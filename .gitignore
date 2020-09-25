@@ -35,3 +35,4 @@ src/github.com/*
 src/golang.org
 .vscode/sftp.json
 */.DS_Store
+.idea/
