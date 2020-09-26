@@ -118,7 +118,10 @@ func (s *server) ReadRoutine() {
 			continue
 		}
 		var message Message
-		json.Unmarshal(payload, &message)
+		err = json.Unmarshal(payload, &message)
+		if err != nil {
+			continue
+		}
 		s.responseChan <- messageWithAddr{message: &message, addr: addr}
 	}
 }
@@ -162,15 +165,6 @@ func (s *server) Write(connId int, payload []byte) error {
 		return err
 	}
 	return nil
-}
-
-func calculateCheckSum(id int, seq int, size int, payload []byte) uint16 {
-	sum := Int2Checksum(id)
-	sum += Int2Checksum(seq)
-	sum += Int2Checksum(size)
-	sum += ByteArray2Checksum(payload)
-	//todo fix checksum
-	return uint16(sum)
 }
 
 func (s *server) CloseConn(connId int) error {
