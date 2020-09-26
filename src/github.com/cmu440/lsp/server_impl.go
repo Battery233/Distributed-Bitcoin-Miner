@@ -11,25 +11,27 @@ import (
 )
 
 type server struct {
-	responseChan chan messageWithAddr
-	writeChan    chan messageWithAddr
-	conn         *lspnet.UDPConn
-	clientMap    map[int]*clientInfo //int->clientId
-	nextConnId   int
-	params       *Params
+	responseChan   chan messageWithAddr
+	writeChan      chan messageWithAddr
+	unreadMessages chan Message
+	conn           *lspnet.UDPConn
+	clientMap      map[int]*clientInfo //int->clientId
+	nextConnId     int
+	params         *Params
 }
 
 type clientInfo struct {
-	nextSeq        int
-	bufferedMsg    map[int][]byte
-	remoteAddr     lspnet.UDPAddr
-	clientReadChan chan []byte
+	nextSeq     int
+	bufferedMsg map[int]Message
+	remoteAddr  lspnet.UDPAddr
 }
 
 type messageWithAddr struct {
 	message *Message
 	addr    *lspnet.UDPAddr
 }
+
+const maxUnreadMessageSize = 2048
 
 // NewServer creates, initiates, and returns a new server. This function should
 // NOT block. Instead, it should spawn one or more goroutines (to handle things
@@ -49,6 +51,7 @@ func NewServer(port int, params *Params) (Server, error) {
 	newServer := &server{
 		make(chan messageWithAddr),
 		make(chan messageWithAddr),
+		make(chan Message, maxUnreadMessageSize),
 		conn,
 		make(map[int]*clientInfo),
 		1,
@@ -69,18 +72,30 @@ func (s *server) MainRoutine() {
 				id := s.nextConnId
 				s.nextConnId++
 				s.clientMap[id] = &clientInfo{
-					nextSeq:        0,
-					bufferedMsg:    make(map[int][]byte),
-					remoteAddr:     *msg.addr,
-					clientReadChan: make(chan []byte, s.params.WindowSize),
+					nextSeq:     0,
+					bufferedMsg: make(map[int]Message),
+					remoteAddr:  *msg.addr,
 				}
 				s.writeChan <- messageWithAddr{&Message{MsgAck, id, 0, 0, 0, nil}, msg.addr}
 				s.clientMap[id].nextSeq++
 			case MsgData:
-				//todo
-
+				id := msg.message.ConnID
+				client := s.clientMap[id]
+				seq := msg.message.SeqNum
+				client.bufferedMsg[seq] = *msg.message
+				//todo checksum
+				for {
+					val, exist := client.bufferedMsg[client.nextSeq]
+					if exist {
+						s.unreadMessages <- val
+						delete(client.bufferedMsg, client.nextSeq)
+						client.nextSeq++
+					} else {
+						break
+					}
+				}
 			case MsgAck:
-
+				//todo
 			}
 		}
 	}
@@ -114,9 +129,8 @@ func (s *server) writeRoutine() {
 }
 
 func (s *server) Read() (int, []byte, error) {
-	// TODO: remove this line when you are ready to begin implementing this method.
-	select {} // Blocks indefinitely.
-	return -1, nil, errors.New("not yet implemented")
+	message := <-s.unreadMessages
+	return message.ConnID, message.Payload, nil
 }
 
 func (s *server) Write(connId int, payload []byte) error {
