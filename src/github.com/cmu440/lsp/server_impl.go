@@ -65,47 +65,49 @@ func NewServer(port int, params *Params) (Server, error) {
 
 func (s *server) MainRoutine() {
 	for {
-		select {
-		case msg := <-s.responseChan:
-			switch msg.message.Type {
-			case MsgConnect:
-				id := s.nextConnId
-				s.nextConnId++
-				s.clientMap[id] = &clientInfo{
-					nextSeq:     0,
-					bufferedMsg: make(map[int]Message),
-					remoteAddr:  *msg.addr,
-				}
-				s.writeChan <- messageWithAddr{&Message{MsgAck, id, 0, 0, 0, nil}, msg.addr}
-				s.clientMap[id].nextSeq++
-			case MsgData:
-				id := msg.message.ConnID
-				client := s.clientMap[id]
-				seq := msg.message.SeqNum
-				client.bufferedMsg[seq] = *msg.message
-				//todo checksum
-				for {
-					val, exist := client.bufferedMsg[client.nextSeq]
-					if exist {
-						s.unreadMessages <- val
-						delete(client.bufferedMsg, client.nextSeq)
-						client.nextSeq++
-					} else {
-						break
-					}
-				}
-			case MsgAck:
-				//todo
+		msg := <-s.responseChan
+		if msg.message.Type == MsgConnect {
+			fmt.Printf("MsgConnect, content = %s\n", msg.message.String())
+			id := s.nextConnId
+			s.nextConnId++
+			s.clientMap[id] = &clientInfo{
+				nextSeq:     0,
+				bufferedMsg: make(map[int]Message),
+				remoteAddr:  *msg.addr,
 			}
+			s.writeChan <- messageWithAddr{&Message{MsgAck, id, 0, 0, 0, nil}, msg.addr}
+			s.clientMap[id].nextSeq++
+		} else if msg.message.Type == MsgData {
+			fmt.Printf("MsgData %s\n", msg.message.String())
+			id := msg.message.ConnID
+			client := s.clientMap[id]
+			seq := msg.message.SeqNum
+			client.bufferedMsg[seq] = *msg.message
+			//todo checksum
+			for {
+				val, exist := client.bufferedMsg[client.nextSeq]
+				if exist {
+					s.unreadMessages <- val
+					delete(client.bufferedMsg, client.nextSeq)
+					client.nextSeq++
+				} else {
+					break
+				}
+			}
+		} else if msg.message.Type == MsgAck {
+			fmt.Printf("MsgAsk %s\n", msg.message.String())
 		}
+		//todo
+
 	}
 
 }
 
 func (s *server) ReadRoutine() {
 	for {
-		payload := make([]byte, 0)
-		_, addr, err := s.conn.ReadFromUDP(payload)
+		payload := make([]byte, 2048)
+		n, addr, err := s.conn.ReadFromUDP(payload)
+		payload = payload[0:n]
 		if err != nil {
 			fmt.Println("read routine err")
 			continue
@@ -124,6 +126,7 @@ func (s *server) writeRoutine() {
 			fmt.Println("Write routine err")
 			continue
 		}
+		fmt.Printf("reply %s\n\n", string(payload))
 		s.conn.WriteToUDP(payload, message.addr)
 	}
 }
