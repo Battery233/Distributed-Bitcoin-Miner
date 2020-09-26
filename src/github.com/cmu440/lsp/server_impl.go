@@ -66,8 +66,9 @@ func NewServer(port int, params *Params) (Server, error) {
 func (s *server) MainRoutine() {
 	for {
 		msg := <-s.responseChan
-		if msg.message.Type == MsgConnect {
-			fmt.Printf("MsgConnect, content = %s\n", msg.message.String())
+		fmt.Printf("Receiven Message: %s \n", msg.message.String())
+		switch msg.message.Type {
+		case MsgConnect:
 			id := s.nextConnId
 			s.nextConnId++
 			s.clientMap[id] = &clientInfo{
@@ -77,13 +78,14 @@ func (s *server) MainRoutine() {
 			}
 			s.writeChan <- messageWithAddr{&Message{MsgAck, id, 0, 0, 0, nil}, msg.addr}
 			s.clientMap[id].nextSeq++
-		} else if msg.message.Type == MsgData {
-			fmt.Printf("MsgData %s\n", msg.message.String())
+		case MsgData:
 			id := msg.message.ConnID
 			client := s.clientMap[id]
 			seq := msg.message.SeqNum
 			client.bufferedMsg[seq] = *msg.message
 			//todo checksum
+			//todo timeout
+			//todo send ack
 			for {
 				val, exist := client.bufferedMsg[client.nextSeq]
 				if exist {
@@ -94,13 +96,10 @@ func (s *server) MainRoutine() {
 					break
 				}
 			}
-		} else if msg.message.Type == MsgAck {
-			fmt.Printf("MsgAsk %s\n", msg.message.String())
+		case MsgAck:
+			//todo
 		}
-		//todo
-
 	}
-
 }
 
 func (s *server) ReadRoutine() {
@@ -109,7 +108,7 @@ func (s *server) ReadRoutine() {
 		n, addr, err := s.conn.ReadFromUDP(payload)
 		payload = payload[0:n]
 		if err != nil {
-			fmt.Println("read routine err")
+			fmt.Println("Read routine err")
 			continue
 		}
 		var message Message
@@ -126,7 +125,7 @@ func (s *server) writeRoutine() {
 			fmt.Println("Write routine err")
 			continue
 		}
-		fmt.Printf("reply %s\n\n", string(payload))
+		fmt.Printf("Reply %s\n\n", string(payload))
 		s.conn.WriteToUDP(payload, message.addr)
 	}
 }
