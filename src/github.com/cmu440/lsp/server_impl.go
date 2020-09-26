@@ -5,15 +5,14 @@ package lsp
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"github.com/cmu440/lspnet"
 	"strconv"
 )
 
 type server struct {
-	responseChan   chan messageWithAddr
-	writeAckChan   chan messageWithAddr
-	unreadMessages chan Message
+	receivedChan   chan *messageWithAddr
+	writeAckChan   chan *messageWithAddr
+	unreadMessages chan *Message
 	conn           *lspnet.UDPConn
 	clientMap      map[int]*clientInfo //int->clientId
 	nextConnId     int
@@ -23,7 +22,7 @@ type server struct {
 type clientInfo struct {
 	nextClientSeq int
 	nextServerSeq int
-	bufferedMsg   map[int]Message
+	bufferedMsg   map[int]*Message
 	remoteAddr    lspnet.UDPAddr
 }
 
@@ -31,8 +30,6 @@ type messageWithAddr struct {
 	message *Message
 	addr    *lspnet.UDPAddr
 }
-
-const maxUnreadMessageSize = 2048
 
 // NewServer creates, initiates, and returns a new server. This function should
 // NOT block. Instead, it should spawn one or more goroutines (to handle things
@@ -50,9 +47,9 @@ func NewServer(port int, params *Params) (Server, error) {
 		return nil, err
 	}
 	newServer := &server{
-		make(chan messageWithAddr),
-		make(chan messageWithAddr),
-		make(chan Message, maxUnreadMessageSize),
+		make(chan *messageWithAddr),
+		make(chan *messageWithAddr),
+		make(chan *Message, maxUnreadMessageSize),
 		conn,
 		make(map[int]*clientInfo),
 		1,
@@ -66,19 +63,19 @@ func NewServer(port int, params *Params) (Server, error) {
 
 func (s *server) MainRoutine() {
 	for {
-		msg := <-s.responseChan
-		fmt.Printf("Receive Message: %s \n", msg.message.String())
+		msg := <-s.receivedChan
+		//fmt.Printf("Receive Message: %s \n", msg.message.String())
 		switch msg.message.Type {
 		case MsgConnect:
 			id := s.nextConnId
 			s.nextConnId++
 			s.clientMap[id] = &clientInfo{
 				nextClientSeq: 0,
-				bufferedMsg:   make(map[int]Message),
+				bufferedMsg:   make(map[int]*Message),
 				remoteAddr:    *msg.addr,
 				nextServerSeq: 1,
 			}
-			s.writeAckChan <- messageWithAddr{NewAck(id, 0), msg.addr}
+			s.writeAckChan <- &messageWithAddr{NewAck(id, 0), msg.addr}
 			s.clientMap[id].nextClientSeq++
 		case MsgData:
 			id := msg.message.ConnID
@@ -87,11 +84,11 @@ func (s *server) MainRoutine() {
 			if seq < client.nextClientSeq {
 				continue
 			}
-			client.bufferedMsg[seq] = *msg.message
+			client.bufferedMsg[seq] = msg.message
 			//todo checksum
 			//todo timeout
 			//todo heartbeat to clients every epoch
-			s.writeAckChan <- messageWithAddr{NewAck(id, seq), msg.addr}
+			s.writeAckChan <- &messageWithAddr{NewAck(id, seq), msg.addr}
 			for {
 				val, exist := client.bufferedMsg[client.nextClientSeq]
 				if exist {
@@ -114,7 +111,7 @@ func (s *server) ReadRoutine() {
 		n, addr, err := s.conn.ReadFromUDP(payload)
 		payload = payload[0:n]
 		if err != nil {
-			fmt.Println("Read routine err")
+			//fmt.Println("Read routine err")
 			continue
 		}
 		var message Message
@@ -122,7 +119,7 @@ func (s *server) ReadRoutine() {
 		if err != nil {
 			continue
 		}
-		s.responseChan <- messageWithAddr{message: &message, addr: addr}
+		s.receivedChan <- &messageWithAddr{message: &message, addr: addr}
 	}
 }
 
@@ -131,19 +128,20 @@ func (s *server) writeAckRoutine() {
 		message := <-s.writeAckChan
 		payload, err := json.Marshal(message.message)
 		if err != nil {
-			fmt.Println("Write routine err")
+			//fmt.Println("Write routine err")
 			continue
 		}
-		fmt.Printf("Reply %s\n\n", string(payload))
+		//fmt.Printf("Reply %s\n\n", string(payload))
 		_, err = s.conn.WriteToUDP(payload, message.addr)
 		if err != nil {
-			fmt.Println("Write routine err")
+			//fmt.Println("Write routine err")
 			continue
 		}
 	}
 }
 
 func (s *server) Read() (int, []byte, error) {
+	//todo return error properly
 	message := <-s.unreadMessages
 	return message.ConnID, message.Payload, nil
 }
@@ -155,10 +153,10 @@ func (s *server) Write(connId int, payload []byte) error {
 	data := NewData(connId, outGoingSeq, size, payload, calculateCheckSum(connId, outGoingSeq, size, payload))
 	payload, err := json.Marshal(data)
 	if err != nil {
-		fmt.Println("Write routine err")
+		//fmt.Println("Write routine err")
 		return err
 	}
-	fmt.Printf("Write data %s\n\n", data.String())
+	//fmt.Printf("Write data %s\n\n", data.String())
 	_, err = s.conn.WriteToUDP(payload, &s.clientMap[connId].remoteAddr)
 	if err != nil {
 		//todo do what if the client is closed and others
