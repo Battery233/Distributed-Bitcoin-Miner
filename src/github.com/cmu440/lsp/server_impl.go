@@ -12,7 +12,7 @@ import (
 
 type server struct {
 	responseChan   chan messageWithAddr
-	writeChan      chan messageWithAddr
+	writeAckChan   chan messageWithAddr
 	unreadMessages chan Message
 	conn           *lspnet.UDPConn
 	clientMap      map[int]*clientInfo //int->clientId
@@ -21,9 +21,10 @@ type server struct {
 }
 
 type clientInfo struct {
-	nextSeq     int
-	bufferedMsg map[int]Message
-	remoteAddr  lspnet.UDPAddr
+	nextClientSeq int
+	nextServerSeq int
+	bufferedMsg   map[int]Message
+	remoteAddr    lspnet.UDPAddr
 }
 
 type messageWithAddr struct {
@@ -59,39 +60,44 @@ func NewServer(port int, params *Params) (Server, error) {
 	}
 	go newServer.ReadRoutine()
 	go newServer.MainRoutine()
-	go newServer.writeRoutine()
+	go newServer.writeAckRoutine()
 	return newServer, nil
 }
 
 func (s *server) MainRoutine() {
 	for {
 		msg := <-s.responseChan
-		fmt.Printf("Receiven Message: %s \n", msg.message.String())
+		fmt.Printf("Receive Message: %s \n", msg.message.String())
 		switch msg.message.Type {
 		case MsgConnect:
 			id := s.nextConnId
 			s.nextConnId++
 			s.clientMap[id] = &clientInfo{
-				nextSeq:     0,
-				bufferedMsg: make(map[int]Message),
-				remoteAddr:  *msg.addr,
+				nextClientSeq: 0,
+				bufferedMsg:   make(map[int]Message),
+				remoteAddr:    *msg.addr,
+				nextServerSeq: 1,
 			}
-			s.writeChan <- messageWithAddr{&Message{MsgAck, id, 0, 0, 0, nil}, msg.addr}
-			s.clientMap[id].nextSeq++
+			s.writeAckChan <- messageWithAddr{NewAck(id, 0), msg.addr}
+			s.clientMap[id].nextClientSeq++
 		case MsgData:
 			id := msg.message.ConnID
 			client := s.clientMap[id]
 			seq := msg.message.SeqNum
+			if seq < client.nextClientSeq {
+				continue
+			}
 			client.bufferedMsg[seq] = *msg.message
 			//todo checksum
 			//todo timeout
-			//todo send ack
+			//todo heartbeat to clients every epoch
+			s.writeAckChan <- messageWithAddr{NewAck(id, seq), msg.addr}
 			for {
-				val, exist := client.bufferedMsg[client.nextSeq]
+				val, exist := client.bufferedMsg[client.nextClientSeq]
 				if exist {
 					s.unreadMessages <- val
-					delete(client.bufferedMsg, client.nextSeq)
-					client.nextSeq++
+					delete(client.bufferedMsg, client.nextClientSeq)
+					client.nextClientSeq++
 				} else {
 					break
 				}
@@ -117,16 +123,20 @@ func (s *server) ReadRoutine() {
 	}
 }
 
-func (s *server) writeRoutine() {
+func (s *server) writeAckRoutine() {
 	for {
-		message := <-s.writeChan
+		message := <-s.writeAckChan
 		payload, err := json.Marshal(message.message)
 		if err != nil {
 			fmt.Println("Write routine err")
 			continue
 		}
 		fmt.Printf("Reply %s\n\n", string(payload))
-		s.conn.WriteToUDP(payload, message.addr)
+		_, err = s.conn.WriteToUDP(payload, message.addr)
+		if err != nil {
+			fmt.Println("Write routine err")
+			continue
+		}
 	}
 }
 
@@ -136,8 +146,31 @@ func (s *server) Read() (int, []byte, error) {
 }
 
 func (s *server) Write(connId int, payload []byte) error {
+	outGoingSeq := s.clientMap[connId].nextServerSeq
+	s.clientMap[connId].nextServerSeq++
+	size := len(payload)
+	data := NewData(connId, outGoingSeq, size, payload, calculateCheckSum(connId, outGoingSeq, size, payload))
+	payload, err := json.Marshal(data)
+	if err != nil {
+		fmt.Println("Write routine err")
+		return err
+	}
+	fmt.Printf("Write data %s\n\n", data.String())
+	_, err = s.conn.WriteToUDP(payload, &s.clientMap[connId].remoteAddr)
+	if err != nil {
+		//todo do what if the client is closed and others
+		return err
+	}
+	return nil
+}
 
-	return errors.New("not yet implemented")
+func calculateCheckSum(id int, seq int, size int, payload []byte) uint16 {
+	sum := Int2Checksum(id)
+	sum += Int2Checksum(seq)
+	sum += Int2Checksum(size)
+	sum += ByteArray2Checksum(payload)
+	//todo fix checksum
+	return uint16(sum)
 }
 
 func (s *server) CloseConn(connId int) error {
