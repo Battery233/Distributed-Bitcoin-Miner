@@ -5,7 +5,7 @@ package lsp
 import (
 	"encoding/json"
 	"errors"
-	//"fmt"
+	"fmt"
 	"github.com/cmu440/lspnet"
 )
 
@@ -97,7 +97,10 @@ func (c *client) mainRoutine() {
 			}
 			c.bufferedMsg[seq] = message
 			if message.Checksum != calculateCheckSum(message.ConnID, message.SeqNum, message.Size, message.Payload) {
-				//fmt.Println("wrong checksum received")
+				fmt.Println("wrong checksum received")
+				continue
+			}
+			if message.Size!=len(message.Payload) {
 				continue
 			}
 			//todo heartbeat to server every epoch
@@ -115,7 +118,7 @@ func (c *client) mainRoutine() {
 		case MsgAck:
 			//todo
 		default:
-			//fmt.Println("Wrong msg type")
+			fmt.Println("Wrong msg type")
 			continue
 		}
 	}
@@ -126,13 +129,13 @@ func (c *client) writeAckRoutine() {
 		message := <-c.writeAckChan
 		payload, err := json.Marshal(message)
 		if err != nil {
-			//fmt.Println("Write routine err")
+			fmt.Println("Write routine err")
 			continue
 		}
-		////fmt.Printf("Reply %s\n\n", string(payload))
+		//fmt.Printf("Reply %s\n\n", string(payload))
 		_, err = c.conn.Write(payload)
 		if err != nil {
-			//fmt.Println("Write routine err")
+			fmt.Println("Write routine err")
 			continue
 		}
 	}
@@ -144,7 +147,7 @@ func (c *client) readRoutine() {
 		n, err := c.conn.Read(payload)
 		payload = payload[0:n]
 		if err != nil {
-			//fmt.Println("Read routine err")
+			fmt.Println("Read routine err")
 			continue
 		}
 		var message Message
@@ -171,10 +174,10 @@ func (c *client) Write(payload []byte) error {
 	data := NewData(c.connID, outGoingSeq, size, payload, calculateCheckSum(c.connID, outGoingSeq, size, payload))
 	payload, err := json.Marshal(data)
 	if err != nil {
-		//fmt.Println("client data marshal err")
+		fmt.Println("client data marshal err")
 		return err
 	}
-	//fmt.Printf("Write data %s\n\n", data.String())
+	fmt.Printf("Write data %s\n\n", data.String())
 	_, err = c.conn.Write(payload)
 
 	//todo start a timer for ack
