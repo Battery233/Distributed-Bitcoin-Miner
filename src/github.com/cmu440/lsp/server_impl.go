@@ -50,6 +50,7 @@ func NewServer(port int, params *Params) (Server, error) {
 	newServer := &server{
 		make(chan *messageWithAddr),
 		make(chan *messageWithAddr),
+		//todo remove it later
 		make(chan *Message, maxUnreadMessageSize),
 		conn,
 		make(map[int]*clientInfo),

@@ -71,6 +71,7 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		1,
 		make(map[int]*Message),
 		make(chan *Message),
+		//todo remove it later
 		make(chan *Message, maxUnreadMessageSize),
 		make(chan *Message),
 	}
