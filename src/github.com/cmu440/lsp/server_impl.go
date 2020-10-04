@@ -79,6 +79,7 @@ func (s *server) MainRoutine() {
 		fmt.Printf("Receive Message: %s \n", msg.message.String())
 		switch msg.message.Type {
 		case MsgConnect: //create a new client information and send ack
+		//todo drop duplicate requests
 			id := s.nextConnId
 			s.nextConnId++
 			s.clientMap[id] = &clientInfo{
