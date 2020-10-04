@@ -1,5 +1,6 @@
 package lsp
 
+//todo remove later
 const maxUnreadMessageSize = 2048
 
 func calculateCheckSum(id int, seq int, size int, payload []byte) uint16 {

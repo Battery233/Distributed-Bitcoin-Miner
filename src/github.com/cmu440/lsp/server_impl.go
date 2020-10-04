@@ -11,13 +11,16 @@ import (
 )
 
 type server struct {
-	receivedChan   chan *messageWithAddr
-	writeAckChan   chan *messageWithAddr
-	unreadMessages chan *Message
-	conn           *lspnet.UDPConn
-	clientMap      map[int]*clientInfo //int->clientId
-	nextConnId     int
-	params         *Params
+	receivedChan           chan *messageWithAddr
+	writeAckChan           chan *messageWithAddr
+	unreadMessages         []*Message
+	nextUnbufferedMsgChan  chan *Message
+	requestReadMessageChan chan struct{}
+	replyReadMessageChan   chan *Message
+	conn                   *lspnet.UDPConn
+	clientMap              map[int]*clientInfo //int->clientId
+	nextConnId             int
+	params                 *Params
 }
 
 type clientInfo struct {
@@ -51,7 +54,10 @@ func NewServer(port int, params *Params) (Server, error) {
 		make(chan *messageWithAddr),
 		make(chan *messageWithAddr),
 		//todo remove it later
-		make(chan *Message, maxUnreadMessageSize),
+		make([]*Message, params.WindowSize),
+		make(chan *Message),
+		make(chan struct{}),
+		make(chan *Message),
 		conn,
 		make(map[int]*clientInfo),
 		1,
@@ -60,6 +66,7 @@ func NewServer(port int, params *Params) (Server, error) {
 	go newServer.ReadRoutine()
 	go newServer.MainRoutine()
 	go newServer.writeAckRoutine()
+	go newServer.messageBufferRoutine()
 	return newServer, nil
 }
 
@@ -99,7 +106,7 @@ func (s *server) MainRoutine() {
 			for {
 				val, exist := client.bufferedMsg[client.nextClientSeq]
 				if exist {
-					s.unreadMessages <- val
+					s.nextUnbufferedMsgChan <- val
 					delete(client.bufferedMsg, client.nextClientSeq)
 					client.nextClientSeq++
 				} else {
@@ -130,6 +137,24 @@ func (s *server) ReadRoutine() {
 	}
 }
 
+func (s *server) messageBufferRoutine() {
+	for {
+		select {
+		case msg := <-s.nextUnbufferedMsgChan:
+			s.unreadMessages = append(s.unreadMessages, msg)
+		case <-s.requestReadMessageChan:
+			if len(s.unreadMessages) > 0 {
+				s.replyReadMessageChan <- s.unreadMessages[0]
+				s.unreadMessages = s.unreadMessages[1:]
+			} else {
+				//if the unread buffer is empty, block here until next unread message arrives
+				msg := <-s.nextUnbufferedMsgChan
+				s.replyReadMessageChan <- msg
+			}
+		}
+	}
+}
+
 func (s *server) writeAckRoutine() {
 	for {
 		message := <-s.writeAckChan
@@ -149,7 +174,8 @@ func (s *server) writeAckRoutine() {
 
 func (s *server) Read() (int, []byte, error) {
 	//todo return error properly
-	message := <-s.unreadMessages
+	s.requestReadMessageChan <- struct{}{}
+	message := <-s.replyReadMessageChan
 	return message.ConnID, message.Payload, nil
 }
 
