@@ -11,28 +11,28 @@ import (
 )
 
 type server struct {
-	receivedChan           chan *messageWithAddr
-	writeAckChan           chan *messageWithAddr
-	unreadMessages         []*Message
-	nextUnbufferedMsgChan  chan *Message
-	requestReadMessageChan chan struct{}
-	replyReadMessageChan   chan *Message
-	conn                   *lspnet.UDPConn
-	clientMap              map[int]*clientInfo //int->clientId
-	nextConnId             int
-	params                 *Params
+	receivedChan           chan *messageWithAddr // channel for accepting new messages
+	writeAckChan           chan *messageWithAddr //channel for ack writing
+	unreadMessages         []*Message            //a slice buffer to store all ordered but unread messages
+	nextUnbufferedMsgChan  chan *Message         // a channel to send a new ordered message to the buffer handling routine
+	requestReadMessageChan chan struct{}         // a signal channel for the read func to request next message
+	replyReadMessageChan   chan *Message         //a channel for replying message to the read func
+	conn                   *lspnet.UDPConn       // the udp connection
+	clientMap              map[int]*clientInfo   //a map int->clientId to store the info
+	nextConnId             int                   //a int to record the id for next incoming client
+	params                 *Params               //config params
 }
 
 type clientInfo struct {
-	nextClientSeq int
-	nextServerSeq int
-	bufferedMsg   map[int]*Message
-	remoteAddr    lspnet.UDPAddr
+	nextClientSeq int              //the seq num we expect for the next message
+	nextServerSeq int              //the next seq for the message from the server to client
+	bufferedMsg   map[int]*Message //message buf for this client to store unordered message k,v->seq, message
+	remoteAddr    lspnet.UDPAddr   //udp address
 }
 
 type messageWithAddr struct {
-	message *Message
-	addr    *lspnet.UDPAddr
+	message *Message        //content
+	addr    *lspnet.UDPAddr //address from the sender (will need the address to send the reply message)
 }
 
 // NewServer creates, initiates, and returns a new server. This function should
@@ -53,7 +53,6 @@ func NewServer(port int, params *Params) (Server, error) {
 	newServer := &server{
 		make(chan *messageWithAddr),
 		make(chan *messageWithAddr),
-		//todo remove it later
 		make([]*Message, 0),
 		make(chan *Message),
 		make(chan struct{}),
@@ -63,19 +62,23 @@ func NewServer(port int, params *Params) (Server, error) {
 		1,
 		params,
 	}
+
 	go newServer.ReadRoutine()
 	go newServer.MainRoutine()
 	go newServer.writeAckRoutine()
 	go newServer.messageBufferRoutine()
+
 	return newServer, nil
 }
 
+// mainRoutine mainly listens for different message types received
+// from the recievedChan, and performs different tasks based on it.
 func (s *server) MainRoutine() {
 	for {
 		msg := <-s.receivedChan
 		fmt.Printf("Receive Message: %s \n", msg.message.String())
 		switch msg.message.Type {
-		case MsgConnect:
+		case MsgConnect: //create a new client information and send ack
 			id := s.nextConnId
 			s.nextConnId++
 			s.clientMap[id] = &clientInfo{
@@ -91,19 +94,24 @@ func (s *server) MainRoutine() {
 			client := s.clientMap[id]
 			seq := msg.message.SeqNum
 			if seq < client.nextClientSeq {
+				//discard messages we already received
 				continue
 			}
 			client.bufferedMsg[seq] = msg.message
 			if msg.message.Checksum != calculateCheckSum(msg.message.ConnID, msg.message.SeqNum, msg.message.Size, msg.message.Payload) {
+				//discard message with wrong checksum
 				continue
 			}
 			if msg.message.Size != len(msg.message.Payload) {
+				//discard message in wrong sizes
 				continue
 			}
 			//todo timeout
 			//todo heartbeat to clients every epoch
-			s.writeAckChan <- &messageWithAddr{NewAck(id, seq), msg.addr}
+			s.writeAckChan <- &messageWithAddr{NewAck(id, seq), msg.addr} //send the ack here
 			for {
+				//for all messages buffered for this client, push those with right order to the server buffer (and get
+				//ready to read by the read func)
 				val, exist := client.bufferedMsg[client.nextClientSeq]
 				if exist {
 					s.nextUnbufferedMsgChan <- val
@@ -119,6 +127,9 @@ func (s *server) MainRoutine() {
 	}
 }
 
+// readRoutine is responsible for read messages from clients and
+// send the message to the receivedChan channel and later processed
+// by the mainRoutine
 func (s *server) ReadRoutine() {
 	for {
 		payload := make([]byte, 2048)
@@ -137,13 +148,17 @@ func (s *server) ReadRoutine() {
 	}
 }
 
+// messageBufferRoutine is responsible for responding data messages to clients.
 func (s *server) messageBufferRoutine() {
 	for {
 		select {
 		case msg := <-s.nextUnbufferedMsgChan:
+			// we got another message that should go into our cache
+			// and wait until the the read method is called
 			s.unreadMessages = append(s.unreadMessages, msg)
 		case <-s.requestReadMessageChan:
 			if len(s.unreadMessages) > 0 {
+				// if there's cached messages, simply send the first one back
 				s.replyReadMessageChan <- s.unreadMessages[0]
 				s.unreadMessages = s.unreadMessages[1:]
 			} else {
@@ -155,6 +170,7 @@ func (s *server) messageBufferRoutine() {
 	}
 }
 
+// writeAckRoutine is responsible for writing ACK messages to the server
 func (s *server) writeAckRoutine() {
 	for {
 		message := <-s.writeAckChan
@@ -172,6 +188,9 @@ func (s *server) writeAckRoutine() {
 	}
 }
 
+// Read sends a read request to the requestReadMessageChan channel to signal
+// that we want a new message from our cache, and listen to replyReadMessageChan
+// for the corresponding message value
 func (s *server) Read() (int, []byte, error) {
 	//todo return error properly
 	s.requestReadMessageChan <- struct{}{}
@@ -179,6 +198,7 @@ func (s *server) Read() (int, []byte, error) {
 	return message.ConnID, message.Payload, nil
 }
 
+// Write writes a message payload to a client via a message with type "data" and id
 func (s *server) Write(connId int, payload []byte) error {
 	outGoingSeq := s.clientMap[connId].nextServerSeq
 	s.clientMap[connId].nextServerSeq++
