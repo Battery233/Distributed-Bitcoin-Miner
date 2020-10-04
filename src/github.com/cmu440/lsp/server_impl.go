@@ -54,7 +54,7 @@ func NewServer(port int, params *Params) (Server, error) {
 		make(chan *messageWithAddr),
 		make(chan *messageWithAddr),
 		//todo remove it later
-		make([]*Message, params.WindowSize),
+		make([]*Message, 0),
 		make(chan *Message),
 		make(chan struct{}),
 		make(chan *Message),

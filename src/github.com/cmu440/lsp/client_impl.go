@@ -19,7 +19,10 @@ type client struct {
 	outGoingSeq    int
 	outGoingBuf    map[int]*Message
 	receivedChan   chan *Message
-	unreadMessages chan *Message
+	unreadMessages         []*Message
+	nextUnbufferedMsgChan  chan *Message
+	requestReadMessageChan chan struct{}
+	replyReadMessageChan   chan *Message
 	writeAckChan   chan *Message
 }
 
@@ -71,14 +74,17 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		1,
 		make(map[int]*Message),
 		make(chan *Message),
-		//todo remove it later
-		make(chan *Message, maxUnreadMessageSize),
+		make([]*Message, 0),
+		make(chan *Message),
+		make(chan struct{}),
+		make(chan *Message),
 		make(chan *Message),
 	}
 
 	go newClient.readRoutine()
 	go newClient.mainRoutine()
 	go newClient.writeAckRoutine()
+	go newClient.messageBufferRoutine()
 
 	return newClient, nil
 }
@@ -109,7 +115,7 @@ func (c *client) mainRoutine() {
 			for {
 				val, exist := c.bufferedMsg[c.incomingSeq]
 				if exist {
-					c.unreadMessages <- val
+					c.nextUnbufferedMsgChan <- val
 					delete(c.bufferedMsg, c.incomingSeq)
 					c.incomingSeq++
 				} else {
@@ -160,9 +166,28 @@ func (c *client) readRoutine() {
 	}
 }
 
+func (c *client) messageBufferRoutine() {
+	for {
+		select {
+		case msg := <-c.nextUnbufferedMsgChan:
+			c.unreadMessages = append(c.unreadMessages, msg)
+		case <-c.requestReadMessageChan:
+			if len(c.unreadMessages) > 0 {
+				c.replyReadMessageChan <- c.unreadMessages[0]
+				c.unreadMessages = c.unreadMessages[1:]
+			} else {
+				//if the unread buffer is empty, block here until next unread message arrives
+				msg := <-c.nextUnbufferedMsgChan
+				c.replyReadMessageChan <- msg
+			}
+		}
+	}
+}
+
 func (c *client) Read() ([]byte, error) {
 	//todo return error properly
-	msg := <-c.unreadMessages
+	c.requestReadMessageChan <- struct{}{}
+	msg := <-c.replyReadMessageChan
 	return msg.Payload, nil
 }
 
