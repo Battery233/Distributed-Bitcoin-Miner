@@ -12,21 +12,24 @@ import (
 //todo remove all prints
 
 type client struct {
-	conn                   *lspnet.UDPConn // connection object between client and server
-	connID                 int
-	incomingSeq            int                     // the next sequence number that client should receive from server
-	bufferedMsg            map[int]*Message        // buffer for incoming unsorted messages
-	outGoingSeq            int                     // the next sequence number that client should send to server
-	outGoingBuf            map[int]*unAckedMessage // the map for storing sent but not acked data\
-	receivedChan           chan *Message           // channel for transferring received message object
-	unreadMessages         []*Message              // cache for storing all unread messages
-	nextUnbufferedMsgChan  chan *Message           // channel for transferring the message to buffer into the unreadMessages cache
-	requestReadMessageChan chan struct{}           // channel for requesting to read a new message from cache
-	replyReadMessageChan   chan *Message           // channel for replying the read cache request
-	writeAckChan           chan *Message           // channel for replying ACK message
-	writeDataChan          chan []byte             //channel for writing outgoing data
-	writeDataResultChan    chan bool               //channel for returning the result of write
-	params                 *Params
+	conn                     *lspnet.UDPConn // connection object between client and server
+	connID                   int
+	incomingSeq              int                     // the next sequence number that client should receive from server
+	bufferedMsg              map[int]*Message        // buffer for incoming unsorted messages
+	outGoingSeq              int                     // the next sequence number that client should send to server
+	outGoingBuf              map[int]*unAckedMessage // the map for storing sent but not acked data\
+	receivedChan             chan *Message           // channel for transferring received message object
+	unreadMessages           []*Message              // cache for storing all unread messages
+	nextUnbufferedMsgChan    chan *Message           // channel for transferring the message to buffer into the unreadMessages cache
+	requestReadMessageChan   chan struct{}           // channel for requesting to read a new message from cache
+	replyReadMessageChan     chan *Message           // channel for replying the read cache request
+	writeAckChan             chan *Message           // channel for replying ACK message
+	alreadySentInEpoch       bool                    //bool for showing if the message was sent during the last epoch
+	alreadyHeardInEpoch      bool
+	lastEpochHeardFromServer int         //int for recoding last time a message is heard from the server
+	writeDataChan            chan []byte //channel for writing outgoing data
+	writeDataResultChan      chan bool   //channel for returning the result of write
+	params                   *Params
 }
 
 // NewClient creates, initiates, and returns a new client. This function
@@ -65,6 +68,9 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		make(chan struct{}),
 		make(chan *Message),
 		make(chan *Message),
+		false,
+		false,
+		0,
 		make(chan []byte),
 		make(chan bool),
 		params,
@@ -73,6 +79,7 @@ func NewClient(hostport string, params *Params) (Client, error) {
 	go newClient.readRoutine()
 
 	ticker := time.NewTicker(time.Millisecond * time.Duration(params.EpochMillis))
+	defer ticker.Stop()
 	connectCounter := 1
 	_, err = conn.Write(payload)
 	if err != nil {
@@ -96,7 +103,6 @@ Connect:
 				break
 			}
 			newClient.connID = msg.ConnID
-			ticker.Stop()
 			break Connect
 		}
 	}
@@ -130,12 +136,9 @@ func (c *client) mainRoutine() {
 			// a new message to the server, we should increment it by 1.
 			outGoingSeq := c.outGoingSeq
 			c.outGoingSeq++
-			//todo add buf map
-			// maybe have a sent but not acked message set??
 			size := len(payload)
 			// construct the data message
 			data := NewData(c.connID, outGoingSeq, size, payload, calculateCheckSum(c.connID, outGoingSeq, size, payload))
-			//todo apply this to server later
 			c.outGoingBuf[outGoingSeq] = &unAckedMessage{
 				data,
 				0,
@@ -149,18 +152,31 @@ func (c *client) mainRoutine() {
 			}
 			//fmt.Printf("Write data %s\n\n", data.String())
 			_, err = c.conn.Write(payload)
-
-			//todo start a timer for ack
-
 			if err != nil {
 				//todo do what if the server is closed and others
 				c.writeDataResultChan <- false
 				continue
 			}
 			c.writeDataResultChan <- true
+			c.alreadySentInEpoch = true
 
 		case <-ticker.C:
-			//todo check if server is dead
+			if c.alreadySentInEpoch {
+				c.alreadySentInEpoch = false
+			} else {
+				c.writeAckChan <- NewAck(c.connID, 0) // heart beat is sent here
+			}
+
+			if c.alreadyHeardInEpoch {
+				c.alreadySentInEpoch = false
+			} else {
+				c.lastEpochHeardFromServer++
+			}
+
+			if c.lastEpochHeardFromServer == c.params.EpochLimit {
+				//todo consider the server is dead
+
+			}
 			for _, element := range c.outGoingBuf {
 				if element.currentBackoff == element.epochCounter {
 					payload, err := json.Marshal(element.message)
@@ -211,8 +227,6 @@ func clientProcessMessage(c *client, message *Message) {
 			// size is wrong, data is corrupted, should ignore
 			return
 		}
-		//todo heartbeat to server every epoch
-
 		c.writeAckChan <- NewAck(c.connID, seq)
 		// otherwise, we send messages back to the server one by one
 		// by incrementing the c.incomingSeq number
@@ -226,8 +240,15 @@ func clientProcessMessage(c *client, message *Message) {
 				break
 			}
 		}
+		c.lastEpochHeardFromServer = 0
+		c.alreadyHeardInEpoch = true
 	case MsgAck:
-		delete(c.outGoingBuf, message.SeqNum)
+		if message.SeqNum == 0 { //if it is a heartbeat message
+			c.lastEpochHeardFromServer = 0
+			c.alreadyHeardInEpoch = true
+		} else {
+			delete(c.outGoingBuf, message.SeqNum)
+		}
 	default:
 		//fmt.Println("Wrong msg type")
 		return

@@ -26,11 +26,14 @@ type server struct {
 }
 
 type clientInfo struct {
-	nextClientSeq int              //the seq num we expect for the next message
-	nextServerSeq int              //the next seq for the message from the server to client
-	bufferedMsg   map[int]*Message //message buf for this client to store unordered message k,v->seq, message
-	remoteAddr    lspnet.UDPAddr   //udp address
-	outGoingBuf   map[int]*unAckedMessage
+	nextClientSeq            int              //the seq num we expect for the next message
+	nextServerSeq            int              //the next seq for the message from the server to client
+	bufferedMsg              map[int]*Message //message buf for this client to store unordered message k,v->seq, message
+	remoteAddr               lspnet.UDPAddr   //udp address
+	outGoingBuf              map[int]*unAckedMessage
+	alreadySentInEpoch       bool //bool for showing if the message was sent during the last epoch
+	alreadyHeardInEpoch      bool
+	lastEpochHeardFromClient int //int for recoding last time a message is heard from the client
 }
 
 type messageWithAddr struct {
@@ -115,10 +118,26 @@ func (s *server) MainRoutine() {
 				continue
 			}
 			s.writeDataResultChan <- true
-
+			s.clientMap[connId].alreadySentInEpoch = true
 		case <-ticker.C:
-			//todo check if clients are dead
-			for _, client := range s.clientMap {
+			for id, client := range s.clientMap {
+				if client.alreadySentInEpoch {
+					client.alreadySentInEpoch = false
+				} else {
+					s.writeAckChan <- &messageWithAddr{NewAck(id, 0), &client.remoteAddr} //send the heartbeat ack here
+				}
+
+				if client.alreadyHeardInEpoch {
+					client.alreadySentInEpoch = false
+				} else {
+					client.lastEpochHeardFromClient++
+				}
+
+				if client.lastEpochHeardFromClient == s.params.EpochLimit {
+					//todo consider the client is dead
+					continue
+				}
+
 				for _, element := range client.outGoingBuf {
 					if element.currentBackoff == element.epochCounter {
 						payload, err := json.Marshal(element.message)
@@ -158,11 +177,14 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 		id := s.nextConnId
 		s.nextConnId++
 		s.clientMap[id] = &clientInfo{
-			nextClientSeq: 0,
-			bufferedMsg:   make(map[int]*Message),
-			remoteAddr:    *msg.addr,
-			nextServerSeq: 1,
-			outGoingBuf:   make(map[int]*unAckedMessage),
+			0,
+			1,
+			make(map[int]*Message),
+			*msg.addr,
+			make(map[int]*unAckedMessage),
+			false,
+			false,
+			0,
 		}
 		s.writeAckChan <- &messageWithAddr{NewAck(id, 0), msg.addr}
 		s.clientMap[id].nextClientSeq++
@@ -183,7 +205,6 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 			//discard message in wrong sizes
 			return
 		}
-		//todo timeout
 		//todo heartbeat to clients every epoch
 		s.writeAckChan <- &messageWithAddr{NewAck(id, seq), msg.addr} //send the ack here
 		for {
@@ -198,8 +219,15 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 				break
 			}
 		}
+		s.clientMap[msg.message.ConnID].lastEpochHeardFromClient = 0
+		s.clientMap[msg.message.ConnID].alreadyHeardInEpoch = true
 	case MsgAck:
-		delete(s.clientMap[msg.message.ConnID].outGoingBuf, msg.message.SeqNum)
+		if msg.message.SeqNum ==0{
+			s.clientMap[msg.message.ConnID].lastEpochHeardFromClient = 0
+			s.clientMap[msg.message.ConnID].alreadyHeardInEpoch = true
+		}else{
+			delete(s.clientMap[msg.message.ConnID].outGoingBuf, msg.message.SeqNum)
+		}
 	}
 }
 
