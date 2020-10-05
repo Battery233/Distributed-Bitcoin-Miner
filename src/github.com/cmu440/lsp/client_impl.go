@@ -19,7 +19,6 @@ type client struct {
 	bufferedMsg            map[int]*Message        // buffer for incoming unsorted messages
 	outGoingSeq            int                     // the next sequence number that client should send to server
 	outGoingBuf            map[int]*unAckedMessage // the map for storing sent but not acked data\
-	epochNotificationChan  chan struct{}
 	receivedChan           chan *Message // channel for transferring received message object
 	unreadMessages         []*Message    // cache for storing all unread messages
 	nextUnbufferedMsgChan  chan *Message // channel for transferring the message to buffer into the unreadMessages cache
@@ -81,7 +80,6 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		make(map[int]*Message),
 		1,
 		make(map[int]*unAckedMessage),
-		make(chan struct{}),
 		make(chan *Message),
 		make([]*Message, 0),
 		make(chan *Message),
@@ -97,7 +95,6 @@ func NewClient(hostport string, params *Params) (Client, error) {
 	go newClient.mainRoutine()
 	go newClient.writeAckRoutine()
 	go newClient.messageBufferRoutine()
-	go newClient.tickerRoutine(params.EpochMillis)
 
 	return newClient, nil
 }
@@ -110,6 +107,9 @@ func (c *client) ConnID() int {
 // mainRoutine mainly listens for different message types received
 // from the recievedChan, and performs different tasks based on it.
 func (c *client) mainRoutine() {
+	ticker := time.NewTicker(time.Millisecond * time.Duration(c.params.EpochMillis))
+	defer ticker.Stop()
+
 	for {
 		select {
 		case message := <-c.receivedChan:
@@ -150,7 +150,7 @@ func (c *client) mainRoutine() {
 			}
 			c.writeDataResultChan <- true
 
-		case <-c.epochNotificationChan:
+		case <-ticker.C:
 			//todo check if server is dead
 			for _, element := range c.outGoingBuf {
 				if element.currentBackoff == element.epochCounter {
@@ -221,20 +221,6 @@ func clientProcessMessage(c *client, message *Message) {
 	default:
 		fmt.Println("Wrong msg type")
 		return
-	}
-}
-
-func (c *client) tickerRoutine(timeMillis int) {
-	ticker := time.NewTicker(time.Millisecond * time.Duration(timeMillis))
-	defer ticker.Stop()
-	var epoch int64
-	for {
-		select {
-		case <-ticker.C:
-			epoch++
-			c.epochNotificationChan <- struct{}{}
-			//todo end timer at the end
-		}
 	}
 }
 

@@ -24,7 +24,6 @@ type server struct {
 	params                 *Params               //config params
 	writeDataChan          chan *payloadWithId   //channel for writing outgoing data
 	writeDataResultChan    chan bool             //channel for returning the result of write
-	epochNotificationChan  chan struct{}
 }
 
 type clientInfo struct {
@@ -73,14 +72,12 @@ func NewServer(port int, params *Params) (Server, error) {
 		params,
 		make(chan *payloadWithId),
 		make(chan bool),
-		make(chan struct{}),
 	}
 
 	go newServer.readRoutine()
 	go newServer.MainRoutine()
 	go newServer.writeAckRoutine()
 	go newServer.messageBufferRoutine()
-	go newServer.tickerRoutine(params.EpochMillis)
 
 	return newServer, nil
 }
@@ -88,6 +85,8 @@ func NewServer(port int, params *Params) (Server, error) {
 // mainRoutine mainly listens for different message types received
 // from the recievedChan, and performs different tasks based on it.
 func (s *server) MainRoutine() {
+	ticker := time.NewTicker(time.Millisecond * time.Duration(s.params.EpochMillis))
+	defer ticker.Stop()
 	for {
 		select {
 		case msg := <-s.receivedChan:
@@ -118,7 +117,7 @@ func (s *server) MainRoutine() {
 			}
 			s.writeDataResultChan <- true
 
-		case <-s.epochNotificationChan:
+		case <-ticker.C:
 			//todo check if clients are dead
 			for _, client := range s.clientMap {
 				for _, element := range client.outGoingBuf {
@@ -196,20 +195,6 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 		}
 	case MsgAck:
 		delete(s.clientMap[msg.message.ConnID].outGoingBuf, msg.message.SeqNum)
-	}
-}
-
-func (s *server) tickerRoutine(timeMillis int) {
-	ticker := time.NewTicker(time.Millisecond * time.Duration(timeMillis))
-	defer ticker.Stop()
-	var epoch int64
-	for {
-		select {
-		case <-ticker.C:
-			epoch++
-			s.epochNotificationChan <- struct{}{}
-			//todo end timer at the end
-		}
 	}
 }
 
