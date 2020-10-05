@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/cmu440/lspnet"
+	"time"
 )
 
 //todo remove all prints
@@ -24,6 +25,8 @@ type client struct {
 	requestReadMessageChan chan struct{}    // channel for requesting to read a new message from cache
 	replyReadMessageChan   chan *Message    // channel for replying the read cache request
 	writeAckChan           chan *Message    // channel for replying ACK message
+	writeDataChan          chan []byte      //channel for writing outgoing data
+	writeDataResultChan    chan bool        //channel for returning the result of write
 }
 
 // NewClient creates, initiates, and returns a new client. This function
@@ -82,12 +85,15 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		make(chan struct{}),
 		make(chan *Message),
 		make(chan *Message),
+		make(chan []byte),
+		make(chan bool),
 	}
 
 	go newClient.readRoutine()
 	go newClient.mainRoutine()
 	go newClient.writeAckRoutine()
 	go newClient.messageBufferRoutine()
+	go newClient.tickerRoutine(params.EpochMillis)
 
 	return newClient, nil
 }
@@ -101,49 +107,95 @@ func (c *client) ConnID() int {
 // from the recievedChan, and performs different tasks based on it.
 func (c *client) mainRoutine() {
 	for {
-		message := <-c.receivedChan
-		switch message.Type {
-		case MsgData:
-			seq := message.SeqNum
-			if seq < c.incomingSeq {
-				// if the seq number from the data message received is less than
-				// the expected incoming sequence number, then we are sure that
-				// this is a resent message that has already been responded, therefore
-				// we just ignore the message
+		select {
+		case message := <-c.receivedChan:
+			clientProcessMessage(c, message)
+		case payload := <-c.writeDataChan:
+			// outGoingSeq is responsible for tracking the correct sequence number
+			// currently for the client to send to the server. Since we are sending
+			// a new message to the server, we should increment it by 1.
+			outGoingSeq := c.outGoingSeq
+			c.outGoingSeq++
+			//todo add buf map
+			size := len(payload)
+			// construct the data message
+			data := NewData(c.connID, outGoingSeq, size, payload, calculateCheckSum(c.connID, outGoingSeq, size, payload))
+			payload, err := json.Marshal(data)
+			if err != nil {
+				fmt.Println("client data marshal err")
+				c.writeDataResultChan <- false
 				continue
 			}
-			// store message into the buffered message map, and associate the value
-			// with the received sequence number
-			c.bufferedMsg[seq] = message
-			if message.Checksum != calculateCheckSum(message.ConnID, message.SeqNum, message.Size, message.Payload) {
-				// data is corrupted, simply ignore the corrupted data
-				fmt.Println("wrong checksum received")
-				continue
-			}
-			if message.Size != len(message.Payload) {
-				// size is wrong, data is corrupted, should ignore
-				continue
-			}
-			//todo heartbeat to server every epoch
+			fmt.Printf("Write data %s\n\n", data.String())
+			_, err = c.conn.Write(payload)
 
-			c.writeAckChan <- NewAck(c.connID, seq)
-			// otherwise, we send messages back to the server one by one
-			// by incrementing the c.incomingSeq number
-			for {
-				val, exist := c.bufferedMsg[c.incomingSeq]
-				if exist {
-					c.nextUnbufferedMsgChan <- val
-					delete(c.bufferedMsg, c.incomingSeq)
-					c.incomingSeq++
-				} else {
-					break
-				}
+			//todo start a timer for ack
+
+			if err != nil {
+				//todo do what if the server is closed and others
+				c.writeDataResultChan <- false
+				continue
 			}
-		case MsgAck:
-			//todo
-		default:
-			fmt.Println("Wrong msg type")
-			continue
+			c.writeDataResultChan <- true
+		}
+	}
+}
+
+func clientProcessMessage(c *client, message *Message) {
+	switch message.Type {
+	case MsgData:
+		seq := message.SeqNum
+		if seq < c.incomingSeq {
+			// if the seq number from the data message received is less than
+			// the expected incoming sequence number, then we are sure that
+			// this is a resent message that has already been responded, therefore
+			// we just ignore the message
+			return
+		}
+		// store message into the buffered message map, and associate the value
+		// with the received sequence number
+		c.bufferedMsg[seq] = message
+		if message.Checksum != calculateCheckSum(message.ConnID, message.SeqNum, message.Size, message.Payload) {
+			// data is corrupted, simply ignore the corrupted data
+			fmt.Println("wrong checksum received")
+			return
+		}
+		if message.Size != len(message.Payload) {
+			// size is wrong, data is corrupted, should ignore
+			return
+		}
+		//todo heartbeat to server every epoch
+
+		c.writeAckChan <- NewAck(c.connID, seq)
+		// otherwise, we send messages back to the server one by one
+		// by incrementing the c.incomingSeq number
+		for {
+			val, exist := c.bufferedMsg[c.incomingSeq]
+			if exist {
+				c.nextUnbufferedMsgChan <- val
+				delete(c.bufferedMsg, c.incomingSeq)
+				c.incomingSeq++
+			} else {
+				break
+			}
+		}
+	case MsgAck:
+		//todo
+	default:
+		fmt.Println("Wrong msg type")
+		return
+	}
+}
+
+func (c *client) tickerRoutine(timeMillis int) {
+	ticker := time.NewTicker(time.Millisecond * time.Duration(timeMillis))
+	defer ticker.Stop()
+	for {
+		select {
+		case t := <-ticker.C:
+			fmt.Println("ticker called with current time: ", t)
+			// TODO: retry
+			// TODO: exponential backoff
 		}
 	}
 }
@@ -202,7 +254,6 @@ func (c *client) writeAckRoutine() {
 			fmt.Println("Write routine err")
 			continue
 		}
-		//fmt.Printf("Reply %s\n\n", string(payload))
 		_, err = c.conn.Write(payload)
 		if err != nil {
 			fmt.Println("Write routine err")
@@ -223,31 +274,12 @@ func (c *client) Read() ([]byte, error) {
 
 // Write writes a message payload to the server via a message with type "data"
 func (c *client) Write(payload []byte) error {
-	// outGoingSeq is responsible for tracking the correct sequence number
-	// currently for the client to send to the server. Since we are sending
-	// a new message to the server, we should increment it by 1.
-	outGoingSeq := c.outGoingSeq
-	c.outGoingSeq++
-
-	//todo add buf map
-	size := len(payload)
-	// construct the data message
-	data := NewData(c.connID, outGoingSeq, size, payload, calculateCheckSum(c.connID, outGoingSeq, size, payload))
-	payload, err := json.Marshal(data)
-	if err != nil {
-		fmt.Println("client data marshal err")
-		return err
+	c.writeDataChan <- payload
+	//todo if time out, do something
+	if <-c.writeDataResultChan {
+		return nil
 	}
-	fmt.Printf("Write data %s\n\n", data.String())
-	_, err = c.conn.Write(payload)
-
-	//todo start a timer for ack
-
-	if err != nil {
-		//todo do what if the server is closed and others
-		return err
-	}
-	return nil
+	return errors.New("write data to server error")
 }
 
 func (c *client) Close() error {

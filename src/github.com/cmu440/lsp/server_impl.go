@@ -21,6 +21,8 @@ type server struct {
 	clientMap              map[int]*clientInfo   //a map int->clientId to store the info
 	nextConnId             int                   //a int to record the id for next incoming client
 	params                 *Params               //config params
+	writeDataChan          chan *payloadWithId   //channel for writing outgoing data
+	writeDataResultChan    chan bool             //channel for returning the result of write
 }
 
 type clientInfo struct {
@@ -33,6 +35,11 @@ type clientInfo struct {
 type messageWithAddr struct {
 	message *Message        //content
 	addr    *lspnet.UDPAddr //address from the sender (will need the address to send the reply message)
+}
+
+type payloadWithId struct {
+	payload []byte
+	id      int
 }
 
 // NewServer creates, initiates, and returns a new server. This function should
@@ -61,6 +68,8 @@ func NewServer(port int, params *Params) (Server, error) {
 		make(map[int]*clientInfo),
 		1,
 		params,
+		make(chan *payloadWithId),
+		make(chan bool),
 	}
 
 	go newServer.ReadRoutine()
@@ -75,56 +84,81 @@ func NewServer(port int, params *Params) (Server, error) {
 // from the recievedChan, and performs different tasks based on it.
 func (s *server) MainRoutine() {
 	for {
-		msg := <-s.receivedChan
-		fmt.Printf("Receive Message: %s \n", msg.message.String())
-		switch msg.message.Type {
-		case MsgConnect: //create a new client information and send ack
-		//todo drop duplicate requests
-			id := s.nextConnId
-			s.nextConnId++
-			s.clientMap[id] = &clientInfo{
-				nextClientSeq: 0,
-				bufferedMsg:   make(map[int]*Message),
-				remoteAddr:    *msg.addr,
-				nextServerSeq: 1,
-			}
-			s.writeAckChan <- &messageWithAddr{NewAck(id, 0), msg.addr}
-			s.clientMap[id].nextClientSeq++
-		case MsgData:
-			id := msg.message.ConnID
-			client := s.clientMap[id]
-			seq := msg.message.SeqNum
-			if seq < client.nextClientSeq {
-				//discard messages we already received
+		select {
+		case msg := <-s.receivedChan:
+			serverProcessMessage(s, msg)
+		case writeData := <-s.writeDataChan:
+			payload := writeData.payload
+			connId := writeData.id
+			outGoingSeq := s.clientMap[connId].nextServerSeq
+			s.clientMap[connId].nextServerSeq++
+			size := len(payload)
+			data := NewData(connId, outGoingSeq, size, payload, calculateCheckSum(connId, outGoingSeq, size, payload))
+			payload, err := json.Marshal(data)
+			if err != nil {
+				s.writeDataResultChan <- false
 				continue
 			}
-			client.bufferedMsg[seq] = msg.message
-			if msg.message.Checksum != calculateCheckSum(msg.message.ConnID, msg.message.SeqNum, msg.message.Size, msg.message.Payload) {
-				//discard message with wrong checksum
+			fmt.Printf("Write data %s\n\n", data.String())
+			_, err = s.conn.WriteToUDP(payload, &s.clientMap[connId].remoteAddr)
+			if err != nil {
+				//todo do what if the client is closed and others
+				s.writeDataResultChan <- false
 				continue
 			}
-			if msg.message.Size != len(msg.message.Payload) {
-				//discard message in wrong sizes
-				continue
-			}
-			//todo timeout
-			//todo heartbeat to clients every epoch
-			s.writeAckChan <- &messageWithAddr{NewAck(id, seq), msg.addr} //send the ack here
-			for {
-				//for all messages buffered for this client, push those with right order to the server buffer (and get
-				//ready to read by the read func)
-				val, exist := client.bufferedMsg[client.nextClientSeq]
-				if exist {
-					s.nextUnbufferedMsgChan <- val
-					delete(client.bufferedMsg, client.nextClientSeq)
-					client.nextClientSeq++
-				} else {
-					break
-				}
-			}
-		case MsgAck:
-			//todo
+			s.writeDataResultChan <- true
 		}
+	}
+}
+
+func serverProcessMessage(s *server, msg *messageWithAddr) {
+	switch msg.message.Type {
+	case MsgConnect: //create a new client information and send ack
+		//todo drop duplicate requests
+		id := s.nextConnId
+		s.nextConnId++
+		s.clientMap[id] = &clientInfo{
+			nextClientSeq: 0,
+			bufferedMsg:   make(map[int]*Message),
+			remoteAddr:    *msg.addr,
+			nextServerSeq: 1,
+		}
+		s.writeAckChan <- &messageWithAddr{NewAck(id, 0), msg.addr}
+		s.clientMap[id].nextClientSeq++
+	case MsgData:
+		id := msg.message.ConnID
+		client := s.clientMap[id]
+		seq := msg.message.SeqNum
+		if seq < client.nextClientSeq {
+			//discard messages we already received
+			return
+		}
+		client.bufferedMsg[seq] = msg.message
+		if msg.message.Checksum != calculateCheckSum(msg.message.ConnID, msg.message.SeqNum, msg.message.Size, msg.message.Payload) {
+			//discard message with wrong checksum
+			return
+		}
+		if msg.message.Size != len(msg.message.Payload) {
+			//discard message in wrong sizes
+			return
+		}
+		//todo timeout
+		//todo heartbeat to clients every epoch
+		s.writeAckChan <- &messageWithAddr{NewAck(id, seq), msg.addr} //send the ack here
+		for {
+			//for all messages buffered for this client, push those with right order to the server buffer (and get
+			//ready to read by the read func)
+			val, exist := client.bufferedMsg[client.nextClientSeq]
+			if exist {
+				s.nextUnbufferedMsgChan <- val
+				delete(client.bufferedMsg, client.nextClientSeq)
+				client.nextClientSeq++
+			} else {
+				break
+			}
+		}
+	case MsgAck:
+		//todo
 	}
 }
 
@@ -201,22 +235,11 @@ func (s *server) Read() (int, []byte, error) {
 
 // Write writes a message payload to a client via a message with type "data" and id
 func (s *server) Write(connId int, payload []byte) error {
-	outGoingSeq := s.clientMap[connId].nextServerSeq
-	s.clientMap[connId].nextServerSeq++
-	size := len(payload)
-	data := NewData(connId, outGoingSeq, size, payload, calculateCheckSum(connId, outGoingSeq, size, payload))
-	payload, err := json.Marshal(data)
-	if err != nil {
-		fmt.Println("Write routine err")
-		return err
+	s.writeDataChan <- &payloadWithId{payload: payload, id: connId}
+	if <-s.writeDataResultChan {
+		return nil
 	}
-	fmt.Printf("Write data %s\n\n", data.String())
-	_, err = s.conn.WriteToUDP(payload, &s.clientMap[connId].remoteAddr)
-	if err != nil {
-		//todo do what if the client is closed and others
-		return err
-	}
-	return nil
+	return errors.New("write error")
 }
 
 func (s *server) CloseConn(connId int) error {
