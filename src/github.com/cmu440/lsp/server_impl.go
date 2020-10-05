@@ -5,7 +5,6 @@ package lsp
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"github.com/cmu440/lspnet"
 	"strconv"
 	"time"
@@ -108,7 +107,7 @@ func (s *server) MainRoutine() {
 				s.writeDataResultChan <- false
 				continue
 			}
-			fmt.Printf("Write data %s\n\n", data.String())
+			//fmt.Printf("Write data %s\n\n", data.String())
 			_, err = s.conn.WriteToUDP(payload, &s.clientMap[connId].remoteAddr)
 			if err != nil {
 				//todo do what if the client is closed and others
@@ -130,6 +129,7 @@ func (s *server) MainRoutine() {
 						if err != nil {
 							continue
 						}
+						element.epochCounter = 0
 						if element.currentBackoff == 0 {
 							element.currentBackoff = 1
 						} else if element.currentBackoff*2 > s.params.MaxBackOffInterval {
@@ -207,7 +207,7 @@ func (s *server) readRoutine() {
 		n, addr, err := s.conn.ReadFromUDP(payload)
 		payload = payload[0:n]
 		if err != nil {
-			fmt.Println("Read routine err")
+			//fmt.Println("Read routine err")
 			continue
 		}
 		var message Message
@@ -247,13 +247,13 @@ func (s *server) writeAckRoutine() {
 		message := <-s.writeAckChan
 		payload, err := json.Marshal(message.message)
 		if err != nil {
-			fmt.Println("Write routine err")
+			//fmt.Println("Write routine err")
 			continue
 		}
-		fmt.Printf("Reply %s\n\n", string(payload))
+		//fmt.Printf("Reply %s\n\n", string(payload))
 		_, err = s.conn.WriteToUDP(payload, message.addr)
 		if err != nil {
-			fmt.Println("Write routine err")
+			//fmt.Println("Write routine err")
 			continue
 		}
 	}

@@ -5,7 +5,6 @@ package lsp
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"github.com/cmu440/lspnet"
 	"time"
 )
@@ -19,14 +18,14 @@ type client struct {
 	bufferedMsg            map[int]*Message        // buffer for incoming unsorted messages
 	outGoingSeq            int                     // the next sequence number that client should send to server
 	outGoingBuf            map[int]*unAckedMessage // the map for storing sent but not acked data\
-	receivedChan           chan *Message // channel for transferring received message object
-	unreadMessages         []*Message    // cache for storing all unread messages
-	nextUnbufferedMsgChan  chan *Message // channel for transferring the message to buffer into the unreadMessages cache
-	requestReadMessageChan chan struct{} // channel for requesting to read a new message from cache
-	replyReadMessageChan   chan *Message // channel for replying the read cache request
-	writeAckChan           chan *Message // channel for replying ACK message
-	writeDataChan          chan []byte   //channel for writing outgoing data
-	writeDataResultChan    chan bool     //channel for returning the result of write
+	receivedChan           chan *Message           // channel for transferring received message object
+	unreadMessages         []*Message              // cache for storing all unread messages
+	nextUnbufferedMsgChan  chan *Message           // channel for transferring the message to buffer into the unreadMessages cache
+	requestReadMessageChan chan struct{}           // channel for requesting to read a new message from cache
+	replyReadMessageChan   chan *Message           // channel for replying the read cache request
+	writeAckChan           chan *Message           // channel for replying ACK message
+	writeDataChan          chan []byte             //channel for writing outgoing data
+	writeDataResultChan    chan bool               //channel for returning the result of write
 	params                 *Params
 }
 
@@ -134,11 +133,11 @@ func (c *client) mainRoutine() {
 			}
 			payload, err := json.Marshal(data)
 			if err != nil {
-				fmt.Println("client data marshal err")
+				//fmt.Println("client data marshal err")
 				c.writeDataResultChan <- false
 				continue
 			}
-			fmt.Printf("Write data %s\n\n", data.String())
+			//fmt.Printf("Write data %s\n\n", data.String())
 			_, err = c.conn.Write(payload)
 
 			//todo start a timer for ack
@@ -158,11 +157,12 @@ func (c *client) mainRoutine() {
 					if err != nil {
 						continue
 					}
-					fmt.Printf("Resent")
+					//fmt.Printf("Resent")
 					_, err = c.conn.Write(payload)
 					if err != nil {
 						continue
 					}
+					element.epochCounter = 0
 					if element.currentBackoff == 0 {
 						element.currentBackoff = 1
 					} else if element.currentBackoff*2 > c.params.MaxBackOffInterval {
@@ -194,7 +194,7 @@ func clientProcessMessage(c *client, message *Message) {
 		c.bufferedMsg[seq] = message
 		if message.Checksum != calculateCheckSum(message.ConnID, message.SeqNum, message.Size, message.Payload) {
 			// data is corrupted, simply ignore the corrupted data
-			fmt.Println("wrong checksum received")
+			//fmt.Println("wrong checksum received")
 			return
 		}
 		if message.Size != len(message.Payload) {
@@ -219,7 +219,7 @@ func clientProcessMessage(c *client, message *Message) {
 	case MsgAck:
 		delete(c.outGoingBuf, message.SeqNum)
 	default:
-		fmt.Println("Wrong msg type")
+		//fmt.Println("Wrong msg type")
 		return
 	}
 }
@@ -233,7 +233,7 @@ func (c *client) readRoutine() {
 		n, err := c.conn.Read(payload)
 		payload = payload[0:n]
 		if err != nil {
-			fmt.Println("Read routine err")
+			//fmt.Println("Read routine err")
 			continue
 		}
 		var message Message
@@ -275,12 +275,12 @@ func (c *client) writeAckRoutine() {
 		message := <-c.writeAckChan
 		payload, err := json.Marshal(message)
 		if err != nil {
-			fmt.Println("Write routine err")
+			//fmt.Println("Write routine err")
 			continue
 		}
 		_, err = c.conn.Write(payload)
 		if err != nil {
-			fmt.Println("Write routine err")
+			//fmt.Println("Write routine err")
 			continue
 		}
 	}
