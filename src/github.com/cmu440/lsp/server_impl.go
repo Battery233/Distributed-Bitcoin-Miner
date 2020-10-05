@@ -149,7 +149,12 @@ func (s *server) MainRoutine() {
 func serverProcessMessage(s *server, msg *messageWithAddr) {
 	switch msg.message.Type {
 	case MsgConnect: //create a new client information and send ack
-		//todo drop duplicate requests
+		for k, v := range s.clientMap {
+			if v.remoteAddr.String() == (*msg.addr).String() {
+				s.writeAckChan <- &messageWithAddr{NewAck(k, 0), msg.addr}
+				return
+			}
+		}
 		id := s.nextConnId
 		s.nextConnId++
 		s.clientMap[id] = &clientInfo{

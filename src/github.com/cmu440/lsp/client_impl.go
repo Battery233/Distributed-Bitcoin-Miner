@@ -51,30 +51,10 @@ func NewClient(hostport string, params *Params) (Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, err = conn.Write(payload)
-	if err != nil {
-		return nil, err
-	}
-	buffer := make([]byte, 2048)
-	//todo if ack not received after epochs
-	n, _, err := conn.ReadFromUDP(buffer)
-	if err != nil {
-		return nil, err
-	}
-	// copy the buffer
-	buffer = buffer[0:n]
-	var message Message
-	err = json.Unmarshal(buffer, &message)
-	if err != nil {
-		return nil, err
-	}
-	// should get an ACK message back from server with connID
-	if message.Type != MsgAck || message.SeqNum != 0 {
-		return nil, errors.New("illegal ACK for connection")
-	}
+
 	newClient := &client{
 		conn,
-		message.ConnID,
+		0,
 		1,
 		make(map[int]*Message),
 		1,
@@ -91,6 +71,36 @@ func NewClient(hostport string, params *Params) (Client, error) {
 	}
 
 	go newClient.readRoutine()
+
+	ticker := time.NewTicker(time.Millisecond * time.Duration(params.EpochMillis))
+	connectCounter := 1
+	_, err = conn.Write(payload)
+	if err != nil {
+		return nil, err
+	}
+
+Connect:
+	for {
+		select {
+		case <-ticker.C:
+			connectCounter++
+			if connectCounter > params.EpochLimit {
+				return nil, errors.New("connect failed")
+			}
+			_, err = conn.Write(payload)
+			if err != nil {
+				return nil, err
+			}
+		case msg := <-newClient.receivedChan:
+			if msg.Type != MsgAck || msg.SeqNum != 0 {
+				break
+			}
+			newClient.connID = msg.ConnID
+			ticker.Stop()
+			break Connect
+		}
+	}
+
 	go newClient.mainRoutine()
 	go newClient.writeAckRoutine()
 	go newClient.messageBufferRoutine()
