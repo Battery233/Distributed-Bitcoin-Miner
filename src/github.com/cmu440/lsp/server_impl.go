@@ -30,7 +30,7 @@ type clientInfo struct {
 	nextServerSeq            int              //the next seq for the message from the server to client
 	bufferedMsg              map[int]*Message //message buf for this client to store unordered message k,v->seq, message
 	remoteAddr               lspnet.UDPAddr   //udp address
-	outGoingBuf              map[int]*unAckedMessage
+	unackedBuf               map[int]*unAckedMessage
 	alreadySentInEpoch       bool //bool for showing if the message was sent during the last epoch
 	alreadyHeardInEpoch      bool
 	lastEpochHeardFromClient int //int for recoding last time a message is heard from the client
@@ -100,7 +100,7 @@ func (s *server) MainRoutine() {
 			s.clientMap[connId].nextServerSeq++
 			size := len(payload)
 			data := NewData(connId, outGoingSeq, size, payload, calculateCheckSum(connId, outGoingSeq, size, payload))
-			s.clientMap[connId].outGoingBuf[outGoingSeq] = &unAckedMessage{
+			s.clientMap[connId].unackedBuf[outGoingSeq] = &unAckedMessage{
 				message:        data,
 				currentBackoff: 0,
 				epochCounter:   0,
@@ -138,7 +138,7 @@ func (s *server) MainRoutine() {
 					continue
 				}
 
-				for _, element := range client.outGoingBuf {
+				for _, element := range client.unackedBuf {
 					if element.currentBackoff == element.epochCounter {
 						payload, err := json.Marshal(element.message)
 						if err != nil {
@@ -222,11 +222,11 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 		s.clientMap[msg.message.ConnID].lastEpochHeardFromClient = 0
 		s.clientMap[msg.message.ConnID].alreadyHeardInEpoch = true
 	case MsgAck:
-		if msg.message.SeqNum ==0{
+		if msg.message.SeqNum == 0 {
 			s.clientMap[msg.message.ConnID].lastEpochHeardFromClient = 0
 			s.clientMap[msg.message.ConnID].alreadyHeardInEpoch = true
-		}else{
-			delete(s.clientMap[msg.message.ConnID].outGoingBuf, msg.message.SeqNum)
+		} else {
+			delete(s.clientMap[msg.message.ConnID].unackedBuf, msg.message.SeqNum)
 		}
 	}
 }

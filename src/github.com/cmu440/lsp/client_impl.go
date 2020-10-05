@@ -17,7 +17,7 @@ type client struct {
 	incomingSeq              int                     // the next sequence number that client should receive from server
 	bufferedMsg              map[int]*Message        // buffer for incoming unsorted messages
 	outGoingSeq              int                     // the next sequence number that client should send to server
-	outGoingBuf              map[int]*unAckedMessage // the map for storing sent but not acked data\
+	unackedBuf               map[int]*unAckedMessage // the map for storing sent but not acked data
 	receivedChan             chan *Message           // channel for transferring received message object
 	unreadMessages           []*Message              // cache for storing all unread messages
 	nextUnbufferedMsgChan    chan *Message           // channel for transferring the message to buffer into the unreadMessages cache
@@ -139,7 +139,7 @@ func (c *client) mainRoutine() {
 			size := len(payload)
 			// construct the data message
 			data := NewData(c.connID, outGoingSeq, size, payload, calculateCheckSum(c.connID, outGoingSeq, size, payload))
-			c.outGoingBuf[outGoingSeq] = &unAckedMessage{
+			c.unackedBuf[outGoingSeq] = &unAckedMessage{
 				data,
 				0,
 				0,
@@ -177,7 +177,7 @@ func (c *client) mainRoutine() {
 				//todo consider the server is dead
 
 			}
-			for _, element := range c.outGoingBuf {
+			for _, element := range c.unackedBuf {
 				if element.currentBackoff == element.epochCounter {
 					payload, err := json.Marshal(element.message)
 					if err != nil {
@@ -247,7 +247,7 @@ func clientProcessMessage(c *client, message *Message) {
 			c.lastEpochHeardFromServer = 0
 			c.alreadyHeardInEpoch = true
 		} else {
-			delete(c.outGoingBuf, message.SeqNum)
+			delete(c.unackedBuf, message.SeqNum)
 		}
 	default:
 		//fmt.Println("Wrong msg type")
