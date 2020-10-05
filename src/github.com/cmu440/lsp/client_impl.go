@@ -15,18 +15,20 @@ import (
 type client struct {
 	conn                   *lspnet.UDPConn // connection object between client and server
 	connID                 int
-	incomingSeq            int              // the next sequence number that client should receive from server
-	bufferedMsg            map[int]*Message // buffer for incoming unsorted messages
-	outGoingSeq            int              // the next sequence number that client should send to server
-	outGoingBuf            map[int]*Message // todo add comments here
-	receivedChan           chan *Message    // channel for transferring received message object
-	unreadMessages         []*Message       // cache for storing all unread messages
-	nextUnbufferedMsgChan  chan *Message    // channel for transferring the message to buffer into the unreadMessages cache
-	requestReadMessageChan chan struct{}    // channel for requesting to read a new message from cache
-	replyReadMessageChan   chan *Message    // channel for replying the read cache request
-	writeAckChan           chan *Message    // channel for replying ACK message
-	writeDataChan          chan []byte      //channel for writing outgoing data
-	writeDataResultChan    chan bool        //channel for returning the result of write
+	incomingSeq            int                     // the next sequence number that client should receive from server
+	bufferedMsg            map[int]*Message        // buffer for incoming unsorted messages
+	outGoingSeq            int                     // the next sequence number that client should send to server
+	outGoingBuf            map[int]*unAckedMessage // the map for storing sent but not acked data\
+	epochNotificationChan  chan struct{}
+	receivedChan           chan *Message // channel for transferring received message object
+	unreadMessages         []*Message    // cache for storing all unread messages
+	nextUnbufferedMsgChan  chan *Message // channel for transferring the message to buffer into the unreadMessages cache
+	requestReadMessageChan chan struct{} // channel for requesting to read a new message from cache
+	replyReadMessageChan   chan *Message // channel for replying the read cache request
+	writeAckChan           chan *Message // channel for replying ACK message
+	writeDataChan          chan []byte   //channel for writing outgoing data
+	writeDataResultChan    chan bool     //channel for returning the result of write
+	params                 *Params
 }
 
 // NewClient creates, initiates, and returns a new client. This function
@@ -78,7 +80,8 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		1,
 		make(map[int]*Message),
 		1,
-		make(map[int]*Message),
+		make(map[int]*unAckedMessage),
+		make(chan struct{}),
 		make(chan *Message),
 		make([]*Message, 0),
 		make(chan *Message),
@@ -87,6 +90,7 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		make(chan *Message),
 		make(chan []byte),
 		make(chan bool),
+		params,
 	}
 
 	go newClient.readRoutine()
@@ -110,6 +114,7 @@ func (c *client) mainRoutine() {
 		select {
 		case message := <-c.receivedChan:
 			clientProcessMessage(c, message)
+
 		case payload := <-c.writeDataChan:
 			// outGoingSeq is responsible for tracking the correct sequence number
 			// currently for the client to send to the server. Since we are sending
@@ -117,9 +122,16 @@ func (c *client) mainRoutine() {
 			outGoingSeq := c.outGoingSeq
 			c.outGoingSeq++
 			//todo add buf map
+			// maybe have a sent but not acked message set??
 			size := len(payload)
 			// construct the data message
 			data := NewData(c.connID, outGoingSeq, size, payload, calculateCheckSum(c.connID, outGoingSeq, size, payload))
+			//todo apply this to server later
+			c.outGoingBuf[outGoingSeq] = &unAckedMessage{
+				data,
+				0,
+				0,
+			}
 			payload, err := json.Marshal(data)
 			if err != nil {
 				fmt.Println("client data marshal err")
@@ -137,6 +149,31 @@ func (c *client) mainRoutine() {
 				continue
 			}
 			c.writeDataResultChan <- true
+
+		case <-c.epochNotificationChan:
+			//todo check if server is dead
+			for _, element := range c.outGoingBuf {
+				if element.currentBackoff == element.epochCounter {
+					payload, err := json.Marshal(element.message)
+					if err != nil {
+						continue
+					}
+					fmt.Printf("Resent")
+					_, err = c.conn.Write(payload)
+					if err != nil {
+						continue
+					}
+					if element.currentBackoff == 0 {
+						element.currentBackoff = 1
+					} else if element.currentBackoff*2 > c.params.MaxBackOffInterval {
+						element.currentBackoff = c.params.MaxBackOffInterval
+					} else {
+						element.currentBackoff *= 2
+					}
+				} else {
+					element.epochCounter++
+				}
+			}
 		}
 	}
 }
@@ -180,7 +217,7 @@ func clientProcessMessage(c *client, message *Message) {
 			}
 		}
 	case MsgAck:
-		//todo
+		delete(c.outGoingBuf, message.SeqNum)
 	default:
 		fmt.Println("Wrong msg type")
 		return
@@ -190,12 +227,13 @@ func clientProcessMessage(c *client, message *Message) {
 func (c *client) tickerRoutine(timeMillis int) {
 	ticker := time.NewTicker(time.Millisecond * time.Duration(timeMillis))
 	defer ticker.Stop()
+	var epoch int64
 	for {
 		select {
-		case t := <-ticker.C:
-			fmt.Println("ticker called with current time: ", t)
-			// TODO: retry
-			// TODO: exponential backoff
+		case <-ticker.C:
+			epoch++
+			c.epochNotificationChan <- struct{}{}
+			//todo end timer at the end
 		}
 	}
 }

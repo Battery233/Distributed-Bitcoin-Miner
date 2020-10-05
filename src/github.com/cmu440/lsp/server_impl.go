@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/cmu440/lspnet"
 	"strconv"
+	"time"
 )
 
 type server struct {
@@ -23,6 +24,7 @@ type server struct {
 	params                 *Params               //config params
 	writeDataChan          chan *payloadWithId   //channel for writing outgoing data
 	writeDataResultChan    chan bool             //channel for returning the result of write
+	epochNotificationChan  chan struct{}
 }
 
 type clientInfo struct {
@@ -30,6 +32,7 @@ type clientInfo struct {
 	nextServerSeq int              //the next seq for the message from the server to client
 	bufferedMsg   map[int]*Message //message buf for this client to store unordered message k,v->seq, message
 	remoteAddr    lspnet.UDPAddr   //udp address
+	outGoingBuf   map[int]*unAckedMessage
 }
 
 type messageWithAddr struct {
@@ -70,12 +73,14 @@ func NewServer(port int, params *Params) (Server, error) {
 		params,
 		make(chan *payloadWithId),
 		make(chan bool),
+		make(chan struct{}),
 	}
 
-	go newServer.ReadRoutine()
+	go newServer.readRoutine()
 	go newServer.MainRoutine()
 	go newServer.writeAckRoutine()
 	go newServer.messageBufferRoutine()
+	go newServer.tickerRoutine(params.EpochMillis)
 
 	return newServer, nil
 }
@@ -94,6 +99,11 @@ func (s *server) MainRoutine() {
 			s.clientMap[connId].nextServerSeq++
 			size := len(payload)
 			data := NewData(connId, outGoingSeq, size, payload, calculateCheckSum(connId, outGoingSeq, size, payload))
+			s.clientMap[connId].outGoingBuf[outGoingSeq] = &unAckedMessage{
+				message:        data,
+				currentBackoff: 0,
+				epochCounter:   0,
+			}
 			payload, err := json.Marshal(data)
 			if err != nil {
 				s.writeDataResultChan <- false
@@ -107,6 +117,32 @@ func (s *server) MainRoutine() {
 				continue
 			}
 			s.writeDataResultChan <- true
+
+		case <-s.epochNotificationChan:
+			//todo check if clients are dead
+			for _, client := range s.clientMap {
+				for _, element := range client.outGoingBuf {
+					if element.currentBackoff == element.epochCounter {
+						payload, err := json.Marshal(element.message)
+						if err != nil {
+							continue
+						}
+						_, err = s.conn.WriteToUDP(payload, &client.remoteAddr)
+						if err != nil {
+							continue
+						}
+						if element.currentBackoff == 0 {
+							element.currentBackoff = 1
+						} else if element.currentBackoff*2 > s.params.MaxBackOffInterval {
+							element.currentBackoff = s.params.MaxBackOffInterval
+						} else {
+							element.currentBackoff *= 2
+						}
+					} else {
+						element.epochCounter++
+					}
+				}
+			}
 		}
 	}
 }
@@ -122,6 +158,7 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 			bufferedMsg:   make(map[int]*Message),
 			remoteAddr:    *msg.addr,
 			nextServerSeq: 1,
+			outGoingBuf:   make(map[int]*unAckedMessage),
 		}
 		s.writeAckChan <- &messageWithAddr{NewAck(id, 0), msg.addr}
 		s.clientMap[id].nextClientSeq++
@@ -158,14 +195,28 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 			}
 		}
 	case MsgAck:
-		//todo
+		delete(s.clientMap[msg.message.ConnID].outGoingBuf, msg.message.SeqNum)
+	}
+}
+
+func (s *server) tickerRoutine(timeMillis int) {
+	ticker := time.NewTicker(time.Millisecond * time.Duration(timeMillis))
+	defer ticker.Stop()
+	var epoch int64
+	for {
+		select {
+		case <-ticker.C:
+			epoch++
+			s.epochNotificationChan <- struct{}{}
+			//todo end timer at the end
+		}
 	}
 }
 
 // readRoutine is responsible for read messages from clients and
 // send the message to the receivedChan channel and later processed
 // by the mainRoutine
-func (s *server) ReadRoutine() {
+func (s *server) readRoutine() {
 	for {
 		payload := make([]byte, 2048)
 		n, addr, err := s.conn.ReadFromUDP(payload)
