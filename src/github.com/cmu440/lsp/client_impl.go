@@ -5,6 +5,7 @@ package lsp
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/cmu440/lspnet"
 	"time"
 )
@@ -214,15 +215,13 @@ func clientProcessMessage(c *client, message *Message) {
 	switch message.Type {
 	case MsgData:
 		seq := message.SeqNum
-		// store message into the buffered message map, and associate the value
-		// with the received sequence number
-		c.bufferedMsg[seq] = message
 		if message.Checksum != calculateCheckSum(message.ConnID, message.SeqNum, message.Size, message.Payload) {
 			// data is corrupted, simply ignore the corrupted data
-			//fmt.Println("wrong checksum received")
+			fmt.Println("Client: msg wrong size")
 			return
 		}
 		if message.Size != len(message.Payload) {
+			fmt.Println("Client: msg wrong size")
 			// size is wrong, data is corrupted, should ignore
 			return
 		}
@@ -234,6 +233,9 @@ func clientProcessMessage(c *client, message *Message) {
 			// we just ignore the message
 			return
 		}
+		// store message into the buffered message map, and associate the value
+		// with the received sequence number
+		c.bufferedMsg[seq] = message
 		// otherwise, we send messages back to the server one by one
 		// by incrementing the c.incomingSeq number
 		for {

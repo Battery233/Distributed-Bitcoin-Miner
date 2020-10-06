@@ -5,6 +5,7 @@ package lsp
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/cmu440/lspnet"
 	"strconv"
 	"time"
@@ -205,12 +206,13 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 		id := msg.message.ConnID
 		client := s.clientMap[id]
 		seq := msg.message.SeqNum
-		client.bufferedMsg[seq] = msg.message
 		if msg.message.Checksum != calculateCheckSum(msg.message.ConnID, msg.message.SeqNum, msg.message.Size, msg.message.Payload) {
+			fmt.Println("Server: msg wrong checksum")
 			//discard message with wrong checksum
 			return
 		}
 		if msg.message.Size != len(msg.message.Payload) {
+			fmt.Println("Server: msg wrong size")
 			//discard message in wrong sizes
 			return
 		}
@@ -219,6 +221,7 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 			//discard messages we already received
 			return
 		}
+		client.bufferedMsg[seq] = msg.message
 		for {
 			//for all messages buffered for this client, push those with right order to the server buffer (and get
 			//ready to read by the read func)
