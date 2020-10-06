@@ -212,7 +212,7 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 			return
 		}
 		if msg.message.Size != len(msg.message.Payload) {
-			fmt.Printf("Server: msg wrong size. Expected size = %d, actual size = %d ", msg.message.Size, len(msg.message.Payload))
+			fmt.Printf("Server: msg wrong size. Expected size = %d, actual size = %d\n", msg.message.Size, len(msg.message.Payload))
 			//discard message in wrong sizes
 			return
 		}
