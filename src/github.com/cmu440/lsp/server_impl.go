@@ -32,8 +32,8 @@ type clientInfo struct {
 	remoteAddr               lspnet.UDPAddr   //udp address
 	unackedBuf               map[int]*unAckedMessage
 	alreadySentInEpoch       bool //bool for showing if the message was sent during the last epoch
-	alreadyHeardInEpoch      bool
-	lastEpochHeardFromClient int //int for recoding last time a message is heard from the client
+	alreadyHeardInEpoch      bool //bool for showing if the heartbeat was sent during the last epoch
+	lastEpochHeardFromClient int  //int for recoding last time a message is heard from the client
 }
 
 type messageWithAddr struct {
@@ -110,7 +110,6 @@ func (s *server) MainRoutine() {
 				s.writeDataResultChan <- false
 				continue
 			}
-			//fmt.Printf("Write data %s\n\n", data.String())
 			_, err = s.conn.WriteToUDP(payload, &s.clientMap[connId].remoteAddr)
 			if err != nil {
 				//todo do what if the client is closed and others
@@ -193,6 +192,7 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 		client := s.clientMap[id]
 		seq := msg.message.SeqNum
 		if seq < client.nextClientSeq {
+			s.writeAckChan <- &messageWithAddr{NewAck(id, seq), msg.addr} //send the ack here
 			//discard messages we already received
 			return
 		}
@@ -205,7 +205,6 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 			//discard message in wrong sizes
 			return
 		}
-		//todo heartbeat to clients every epoch
 		s.writeAckChan <- &messageWithAddr{NewAck(id, seq), msg.addr} //send the ack here
 		for {
 			//for all messages buffered for this client, push those with right order to the server buffer (and get
@@ -240,7 +239,6 @@ func (s *server) readRoutine() {
 		n, addr, err := s.conn.ReadFromUDP(payload)
 		payload = payload[0:n]
 		if err != nil {
-			//fmt.Println("Read routine err")
 			continue
 		}
 		var message Message
@@ -280,13 +278,10 @@ func (s *server) writeAckRoutine() {
 		message := <-s.writeAckChan
 		payload, err := json.Marshal(message.message)
 		if err != nil {
-			//fmt.Println("Write routine err")
 			continue
 		}
-		//fmt.Printf("Reply %s\n\n", string(payload))
 		_, err = s.conn.WriteToUDP(payload, message.addr)
 		if err != nil {
-			//fmt.Println("Write routine err")
 			continue
 		}
 	}
