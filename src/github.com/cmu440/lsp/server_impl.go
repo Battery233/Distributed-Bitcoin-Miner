@@ -205,11 +205,6 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 		id := msg.message.ConnID
 		client := s.clientMap[id]
 		seq := msg.message.SeqNum
-		if seq < client.nextClientSeq {
-			s.writeAckChan <- &messageWithAddr{NewAck(id, seq), msg.addr} //send the ack here
-			//discard messages we already received
-			return
-		}
 		client.bufferedMsg[seq] = msg.message
 		if msg.message.Checksum != calculateCheckSum(msg.message.ConnID, msg.message.SeqNum, msg.message.Size, msg.message.Payload) {
 			//discard message with wrong checksum
@@ -220,6 +215,10 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 			return
 		}
 		s.writeAckChan <- &messageWithAddr{NewAck(id, seq), msg.addr} //send the ack here
+		if seq < client.nextClientSeq {
+			//discard messages we already received
+			return
+		}
 		for {
 			//for all messages buffered for this client, push those with right order to the server buffer (and get
 			//ready to read by the read func)
