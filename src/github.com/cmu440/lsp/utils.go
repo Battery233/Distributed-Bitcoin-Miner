@@ -15,6 +15,5 @@ func calculateCheckSum(id int, seq int, size int, payload []byte) uint16 {
 		data[i] = payload[i]
 	}
 	sum += ByteArray2Checksum(data)
-	//todo fix checksum
 	return uint16(sum)
 }

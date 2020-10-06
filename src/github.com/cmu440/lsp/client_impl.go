@@ -215,16 +215,21 @@ func clientProcessMessage(c *client, message *Message) {
 	switch message.Type {
 	case MsgData:
 		seq := message.SeqNum
+
+		if message.Size > len(message.Payload) {
+			fmt.Printf("Client: msg wrong size. Expected size = %d, actual size = %d\n", message.Size, len(message.Payload))
+			// size is wrong, data is corrupted, should ignore
+			return
+		} else { //trim message
+			message.Payload = message.Payload[0:message.Size]
+		}
+
 		if message.Checksum != calculateCheckSum(message.ConnID, message.SeqNum, message.Size, message.Payload) {
 			// data is corrupted, simply ignore the corrupted data
 			fmt.Printf("Client: msg wrong checksum. Expected checksum = %d, actual checksum = %d\n", message.Checksum, calculateCheckSum(message.ConnID, message.SeqNum, message.Size, message.Payload))
 			return
 		}
-		if message.Size != len(message.Payload) {
-			fmt.Printf("Client: msg wrong size. Expected size = %d, actual size = %d\n", message.Size, len(message.Payload))
-			// size is wrong, data is corrupted, should ignore
-			return
-		}
+
 		c.writeAckChan <- NewAck(c.connID, seq)
 		if seq < c.incomingSeq {
 			// if the seq number from the data message received is less than

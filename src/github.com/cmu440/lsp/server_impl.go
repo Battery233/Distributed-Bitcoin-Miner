@@ -206,16 +206,21 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 		id := msg.message.ConnID
 		client := s.clientMap[id]
 		seq := msg.message.SeqNum
+
+		if msg.message.Size > len(msg.message.Payload) {
+			fmt.Printf("Server: msg wrong size. Expected size = %d, actual size = %d\n", msg.message.Size, len(msg.message.Payload))
+			//discard message in wrong sizes
+			return
+		} else {
+			msg.message.Payload = msg.message.Payload[0:msg.message.Size]
+		}
+
 		if msg.message.Checksum != calculateCheckSum(msg.message.ConnID, msg.message.SeqNum, msg.message.Size, msg.message.Payload) {
 			fmt.Printf("Server: msg wrong checksum. Expected checksum = %d, actual checksum = %d\n", msg.message.Checksum, calculateCheckSum(msg.message.ConnID, msg.message.SeqNum, msg.message.Size, msg.message.Payload))
 			//discard message with wrong checksum
 			return
 		}
-		if msg.message.Size != len(msg.message.Payload) {
-			fmt.Printf("Server: msg wrong size. Expected size = %d, actual size = %d\n", msg.message.Size, len(msg.message.Payload))
-			//discard message in wrong sizes
-			return
-		}
+
 		s.writeAckChan <- &messageWithAddr{NewAck(id, seq), msg.addr} //send the ack here
 		if seq < client.nextClientSeq {
 			//discard messages we already received
