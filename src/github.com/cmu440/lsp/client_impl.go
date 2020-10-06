@@ -5,6 +5,7 @@ package lsp
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/cmu440/lspnet"
 	"time"
 )
@@ -12,19 +13,24 @@ import (
 //todo remove all prints
 
 type client struct {
-	conn                     *lspnet.UDPConn // connection object between client and server
-	connID                   int
-	incomingSeq              int                     // the next sequence number that client should receive from server
-	bufferedMsg              map[int]*Message        // buffer for incoming unsorted messages
-	outGoingSeq              int                     // the next sequence number that client should send to server
-	unackedBuf               map[int]*unAckedMessage // the map for storing sent but not acked data
-	receivedChan             chan *Message           // channel for transferring received message object
-	unreadMessages           []*Message              // cache for storing all unread messages
-	nextUnbufferedMsgChan    chan *Message           // channel for transferring the message to buffer into the unreadMessages cache
-	requestReadMessageChan   chan struct{}           // channel for requesting to read a new message from cache
-	replyReadMessageChan     chan *Message           // channel for replying the read cache request
-	writeAckChan             chan *Message           // channel for replying ACK message
-	alreadySentInEpoch       bool                    //bool for showing if the message was sent during the last epoch
+	conn        *lspnet.UDPConn // connection object between client and server
+	connID      int
+	incomingSeq int                     // the next sequence number that client should receive from server
+	bufferedMsg map[int]*Message        // buffer for incoming unsorted messages
+	outGoingSeq int                     // the next sequence number that client should send to server
+	unackedBuf  map[int]*unAckedMessage // the map for storing sent but not acked data
+
+	outgoingBuf      []*Message
+	oldestUnackedSeq int
+	unrecordedAckBuf map[int]bool
+
+	receivedChan             chan *Message // channel for transferring received message object
+	unreadMessages           []*Message    // cache for storing all unread messages
+	nextUnbufferedMsgChan    chan *Message // channel for transferring the message to buffer into the unreadMessages cache
+	requestReadMessageChan   chan struct{} // channel for requesting to read a new message from cache
+	replyReadMessageChan     chan *Message // channel for replying the read cache request
+	writeAckChan             chan *Message // channel for replying ACK message
+	alreadySentInEpoch       bool          //bool for showing if the message was sent during the last epoch
 	alreadyHeardInEpoch      bool
 	lastEpochHeardFromServer int         //int for recoding last time a message is heard from the server
 	writeDataChan            chan []byte //channel for writing outgoing data
@@ -62,6 +68,9 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		make(map[int]*Message),
 		1,
 		make(map[int]*unAckedMessage),
+		make([]*Message, 0),
+		1,
+		make(map[int]bool),
 		make(chan *Message),
 		make([]*Message, 0),
 		make(chan *Message),
@@ -139,26 +148,32 @@ func (c *client) mainRoutine() {
 			size := len(payload)
 			// construct the data message
 			data := NewData(c.connID, outGoingSeq, size, payload, calculateCheckSum(c.connID, outGoingSeq, size, payload))
-			c.unackedBuf[outGoingSeq] = &unAckedMessage{
-				data,
-				0,
-				0,
-			}
-			payload, err := json.Marshal(data)
-			if err != nil {
-				//fmt.Println("client data marshal err")
-				c.writeDataResultChan <- false
-				continue
-			}
-			//fmt.Printf("Write data %s\n\n", data.String())
-			_, err = c.conn.Write(payload)
-			if err != nil {
-				//todo do what if the server is closed and others
-				c.writeDataResultChan <- false
-				continue
+
+			if len(c.unackedBuf) < c.params.MaxUnackedMessages && outGoingSeq < c.oldestUnackedSeq+c.params.WindowSize {
+				c.unackedBuf[outGoingSeq] = &unAckedMessage{
+					data,
+					0,
+					0,
+				}
+				payload, err := json.Marshal(data)
+				if err != nil {
+					//fmt.Println("client data marshal err")
+					c.writeDataResultChan <- false
+					continue
+				}
+				//fmt.Printf("Write data %s\n\n", data.String())
+				_, err = c.conn.Write(payload)
+				if err != nil {
+					//todo do what if the server is closed and others
+					c.writeDataResultChan <- false
+					continue
+				}
+				c.alreadySentInEpoch = true
+			} else {
+				fmt.Print("does not in wondewasda")
+				c.outgoingBuf = append(c.outgoingBuf, data)
 			}
 			c.writeDataResultChan <- true
-			c.alreadySentInEpoch = true
 
 		case <-ticker.C:
 			if c.alreadySentInEpoch {
@@ -248,6 +263,46 @@ func clientProcessMessage(c *client, message *Message) {
 			c.alreadyHeardInEpoch = true
 		} else {
 			delete(c.unackedBuf, message.SeqNum)
+			if message.SeqNum>=c.oldestUnackedSeq{
+				c.unrecordedAckBuf[message.SeqNum] = true
+			}
+			for {
+				_, exist := c.unrecordedAckBuf[c.oldestUnackedSeq]
+				if exist{
+					delete(c.unrecordedAckBuf, c.oldestUnackedSeq)
+					c.oldestUnackedSeq++
+				}else{
+					break
+				}
+			}
+			if len(c.outgoingBuf)>0{
+				fmt.Printf( "%d, %t, %t\n",len(c.outgoingBuf) , len(c.unackedBuf) < c.params.MaxUnackedMessages , c.outgoingBuf[0].SeqNum < c.oldestUnackedSeq+c.params.WindowSize)
+			}else{
+				fmt.Println("no out buf")
+			}
+			for len(c.outgoingBuf)>0 && len(c.unackedBuf) < c.params.MaxUnackedMessages && c.outgoingBuf[0].SeqNum < c.oldestUnackedSeq+c.params.WindowSize {
+				data:=c.outgoingBuf[0]
+				c.outgoingBuf = c.outgoingBuf[1:]
+				c.unackedBuf[data.SeqNum] = &unAckedMessage{
+					data,
+					0,
+					0,
+				}
+				payload, _ := json.Marshal(data)
+				//if err != nil {
+				//	//fmt.Println("client data marshal err")
+				//	c.writeDataResultChan <- false
+				//	continue
+				//}
+				//fmt.Printf("Write data %s\n\n", data.String())
+				_, _ = c.conn.Write(payload)
+				//if err != nil {
+				//	//todo do what if the server is closed and others
+				//	c.writeDataResultChan <- false
+				//	continue
+				//}
+				c.alreadySentInEpoch = true
+			}
 		}
 	default:
 		//fmt.Println("Wrong msg type")
