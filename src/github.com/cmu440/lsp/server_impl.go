@@ -207,12 +207,12 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 		client := s.clientMap[id]
 		seq := msg.message.SeqNum
 		if msg.message.Checksum != calculateCheckSum(msg.message.ConnID, msg.message.SeqNum, msg.message.Size, msg.message.Payload) {
-			fmt.Println("Server: msg wrong checksum")
+			fmt.Printf("Server: msg wrong checksum. Expected checksum = %d, actual checksum = %d\n", msg.message.Checksum, calculateCheckSum(msg.message.ConnID, msg.message.SeqNum, msg.message.Size, msg.message.Payload))
 			//discard message with wrong checksum
 			return
 		}
 		if msg.message.Size != len(msg.message.Payload) {
-			fmt.Println("Server: msg wrong size")
+			fmt.Printf("Server: msg wrong size. Expected size = %d, actual size = %d ", msg.message.Size, len(msg.message.Payload))
 			//discard message in wrong sizes
 			return
 		}
