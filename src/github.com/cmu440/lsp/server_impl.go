@@ -31,9 +31,12 @@ type clientInfo struct {
 	bufferedMsg              map[int]*Message //message buf for this client to store unordered message k,v->seq, message
 	remoteAddr               lspnet.UDPAddr   //udp address
 	unackedBuf               map[int]*unAckedMessage
-	alreadySentInEpoch       bool //bool for showing if the message was sent during the last epoch
-	alreadyHeardInEpoch      bool //bool for showing if the heartbeat was sent during the last epoch
-	lastEpochHeardFromClient int  //int for recoding last time a message is heard from the client
+	alreadySentInEpoch       bool         //bool for showing if the message was sent during the last epoch
+	alreadyHeardInEpoch      bool         //bool for showing if the heartbeat was sent during the last epoch
+	lastEpochHeardFromClient int          //int for recoding last time a message is heard from the client
+	outgoingBuf              []*Message   //the buffer to store messages that cannot be sent under sliding window protocol
+	oldestUnackedSeq         int          //the oldest ack number we haven't received yet
+	unrecordedAckBuf         map[int]bool //a map to store the acks we already received but not added to the oldestUnackedSeq yet
 }
 
 type messageWithAddr struct {
@@ -100,24 +103,32 @@ func (s *server) MainRoutine() {
 			s.clientMap[connId].nextServerSeq++
 			size := len(payload)
 			data := NewData(connId, outGoingSeq, size, payload, calculateCheckSum(connId, outGoingSeq, size, payload))
-			s.clientMap[connId].unackedBuf[outGoingSeq] = &unAckedMessage{
-				message:        data,
-				currentBackoff: 0,
-				epochCounter:   0,
-			}
-			payload, err := json.Marshal(data)
-			if err != nil {
-				s.writeDataResultChan <- false
-				continue
-			}
-			_, err = s.conn.WriteToUDP(payload, &s.clientMap[connId].remoteAddr)
-			if err != nil {
-				//todo do what if the client is closed and others
-				s.writeDataResultChan <- false
-				continue
+
+			//send using sliding window here
+			c := s.clientMap[connId]
+			if len(c.unackedBuf) < s.params.MaxUnackedMessages && outGoingSeq < c.oldestUnackedSeq+s.params.WindowSize {
+				c.unackedBuf[outGoingSeq] = &unAckedMessage{
+					data,
+					0,
+					0,
+				}
+				payload, err := json.Marshal(data)
+				if err != nil {
+					s.writeDataResultChan <- false
+					continue
+				}
+				_, err = s.conn.WriteToUDP(payload, &c.remoteAddr)
+				if err != nil {
+					//todo do what if the server is closed and others
+					s.writeDataResultChan <- false
+					continue
+				}
+				c.alreadySentInEpoch = true
+			} else {
+				c.outgoingBuf = append(c.outgoingBuf, data)
 			}
 			s.writeDataResultChan <- true
-			s.clientMap[connId].alreadySentInEpoch = true
+
 		case <-ticker.C:
 			for id, client := range s.clientMap {
 				if client.alreadySentInEpoch {
@@ -184,6 +195,9 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 			false,
 			false,
 			0,
+			make([]*Message, 0),
+			1,
+			make(map[int]bool),
 		}
 		s.writeAckChan <- &messageWithAddr{NewAck(id, 0), msg.addr}
 		s.clientMap[id].nextClientSeq++
@@ -221,11 +235,46 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 		s.clientMap[msg.message.ConnID].lastEpochHeardFromClient = 0
 		s.clientMap[msg.message.ConnID].alreadyHeardInEpoch = true
 	case MsgAck:
-		if msg.message.SeqNum == 0 {
-			s.clientMap[msg.message.ConnID].lastEpochHeardFromClient = 0
-			s.clientMap[msg.message.ConnID].alreadyHeardInEpoch = true
+		message := msg.message
+		c := s.clientMap[msg.message.ConnID] //client
+		if message.SeqNum == 0 {
+			c.lastEpochHeardFromClient = 0
+			c.alreadyHeardInEpoch = true
 		} else {
-			delete(s.clientMap[msg.message.ConnID].unackedBuf, msg.message.SeqNum)
+			delete(c.unackedBuf, msg.message.SeqNum)
+			if message.SeqNum >= c.oldestUnackedSeq {
+				c.unrecordedAckBuf[message.SeqNum] = true
+			}
+			for {
+				_, exist := c.unrecordedAckBuf[c.oldestUnackedSeq]
+				if exist {
+					delete(c.unrecordedAckBuf, c.oldestUnackedSeq)
+					c.oldestUnackedSeq++
+				} else {
+					break
+				}
+			}
+			for len(c.outgoingBuf) > 0 && len(c.unackedBuf) < s.params.MaxUnackedMessages && c.outgoingBuf[0].SeqNum < c.oldestUnackedSeq+s.params.WindowSize {
+				data := c.outgoingBuf[0]
+				c.outgoingBuf = c.outgoingBuf[1:]
+				c.unackedBuf[data.SeqNum] = &unAckedMessage{
+					data,
+					0,
+					0,
+				}
+				payload, err := json.Marshal(data)
+				if err != nil {
+					s.writeDataResultChan <- false
+					continue
+				}
+				_, err = s.conn.WriteToUDP(payload, &c.remoteAddr)
+				if err != nil {
+					//todo do what if the server is closed and others
+					s.writeDataResultChan <- false
+					continue
+				}
+				c.alreadySentInEpoch = true
+			}
 		}
 	}
 }
@@ -300,6 +349,7 @@ func (s *server) Read() (int, []byte, error) {
 // Write writes a message payload to a client via a message with type "data" and id
 func (s *server) Write(connId int, payload []byte) error {
 	s.writeDataChan <- &payloadWithId{payload: payload, id: connId}
+	//todo fix this channel here
 	if <-s.writeDataResultChan {
 		return nil
 	}
