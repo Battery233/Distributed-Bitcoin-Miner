@@ -5,7 +5,6 @@ package lsp
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"github.com/cmu440/lspnet"
 	"time"
 )
@@ -257,7 +256,6 @@ func clientProcessMessage(c *client, message *Message, closed bool) bool {
 		seq := message.SeqNum
 
 		if message.Size > len(message.Payload) {
-			//fmt.Printf("Client: msg wrong size. Expected size = %d, actual size = %d\n", message.Size, len(message.Payload))
 			// size is wrong, data is corrupted, should ignore
 			return false
 		} else { //trim message
@@ -266,7 +264,6 @@ func clientProcessMessage(c *client, message *Message, closed bool) bool {
 
 		if message.Checksum != calculateCheckSum(message.ConnID, message.SeqNum, message.Size, message.Payload) {
 			// data is corrupted, simply ignore the corrupted data
-			//fmt.Printf("Client: msg wrong checksum. Expected checksum = %d, actual checksum = %d\n", message.Checksum, calculateCheckSum(message.ConnID, message.SeqNum, message.Size, message.Payload))
 			return false
 		}
 
@@ -386,6 +383,8 @@ func (c *client) messageBufferRoutine() {
 					c.replyReadMessageChan <- msg
 				case <-c.serverTimeoutChan:
 					c.replyReadMessageChan <- &Message{}
+				case <-c.messageBufRoutineCloseChan:
+					return
 				}
 			}
 		case <-c.messageBufRoutineCloseChan:
@@ -455,7 +454,6 @@ func (c *client) Close() error {
 	c.mainRoutineCloseChan <- struct{}{}
 	close(c.mainRoutineCloseChan)
 	<-c.closedSuccessfullyChan
-	fmt.Printf("Client %d closed\n", c.ConnID())
 	c.isClosed = true
 	return nil
 }

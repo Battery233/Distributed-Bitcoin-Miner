@@ -5,30 +5,32 @@ package lsp
 import (
 	"encoding/json"
 	"errors"
-	//"fmt"
 	"github.com/cmu440/lspnet"
 	"strconv"
 	"time"
 )
 
 type server struct {
-	receivedChan           chan *messageWithAddr // channel for accepting new messages
-	writeAckChan           chan *messageWithAddr //channel for ack writing
-	unreadMessages         []*Message            //a slice buffer to store all ordered but unread messages
-	nextUnbufferedMsgChan  chan *Message         // a channel to send a new ordered message to the buffer handling routine
-	requestReadMessageChan chan struct{}         // a signal channel for the read func to request next message
-	replyReadMessageChan   chan *Message         //a channel for replying message to the read func
-	conn                   *lspnet.UDPConn       // the udp connection
-	clientMap              map[int]*clientInfo   //a map int->clientId to store the info
-	nextConnId             int                   //a int to record the id for next incoming client
-	params                 *Params               //config params
-	writeDataChan          chan *payloadWithId   //channel for writing outgoing data
-	writeDataResultChan    chan bool             //channel for returning the result of write
-	closeConnChannel       chan int
-	closeConnReplyChan     chan bool
-	isClosed               bool
-	closeServerSignalChan  chan struct{}
-	closeServerSuccessChan chan bool
+	receivedChan               chan *messageWithAddr // channel for accepting new messages
+	writeAckChan               chan *messageWithAddr //channel for ack writing
+	unreadMessages             []*Message            //a slice buffer to store all ordered but unread messages
+	nextUnbufferedMsgChan      chan *Message         // a channel to send a new ordered message to the buffer handling routine
+	requestReadMessageChan     chan struct{}         // a signal channel for the read func to request next message
+	replyReadMessageChan       chan *Message         //a channel for replying message to the read func
+	conn                       *lspnet.UDPConn       // the udp connection
+	clientMap                  map[int]*clientInfo   //a map int->clientId to store the info
+	nextConnId                 int                   //a int to record the id for next incoming client
+	params                     *Params               //config params
+	writeDataChan              chan *payloadWithId   //channel for writing outgoing data
+	writeDataResultChan        chan bool             //channel for returning the result of write
+	closeConnChannel           chan int
+	closeConnReplyChan         chan bool
+	isClosed                   bool
+	closeServerSignalChan      chan struct{}
+	readRoutineCloseChan       chan struct{}
+	writeAckRoutineCloseChan   chan struct{}
+	messageBufRoutineCloseChan chan struct{}
+	closeServerSuccessChan     chan bool
 }
 
 type clientInfo struct {
@@ -87,6 +89,9 @@ func NewServer(port int, params *Params) (Server, error) {
 		make(chan int),
 		make(chan bool),
 		false,
+		make(chan struct{}),
+		make(chan struct{}),
+		make(chan struct{}),
 		make(chan struct{}),
 		make(chan bool),
 	}
@@ -158,27 +163,27 @@ func (s *server) mainRoutine() {
 
 		case <-ticker.C:
 			if serverClosed && len(s.clientMap) == 0 {
-				//todo close routines
-
-
+				s.conn.Close()
+				s.messageBufRoutineCloseChan <- struct{}{}
+				close(s.receivedChan)
+				s.readRoutineCloseChan <- struct{}{}
+				close(s.writeAckChan)
+				s.writeAckRoutineCloseChan <- struct{}{}
 				s.closeServerSuccessChan <- serverClosedSuccess
+				return
 			}
 			for id, client := range s.clientMap {
 				if client.alreadySentInEpoch {
 					client.alreadySentInEpoch = false
 				} else {
 					s.writeAckChan <- &messageWithAddr{NewAck(id, 0), &client.remoteAddr} //send the heartbeat ack here
-					//fmt.Println("Server heartbeat", client.lastEpochHeardFromClient)
 				}
-
 				if !client.alreadyHeardInEpoch {
 					client.lastEpochHeardFromClient++
 				}
-
 				client.alreadyHeardInEpoch = false
 
 				if client.lastEpochHeardFromClient == s.params.EpochLimit {
-					//fmt.Printf("no heartbeat. Deleted client: %v\n", id)
 					delete(s.clientMap, id)
 					// we send an message with nil payload to indicate that the client is lost
 					s.nextUnbufferedMsgChan <- &Message{
@@ -259,7 +264,6 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 		seq := msg.message.SeqNum
 
 		if msg.message.Size > len(msg.message.Payload) {
-			//fmt.Printf("Server: msg wrong size. Expected size = %d, actual size = %d\n", msg.message.Size, len(msg.message.Payload))
 			//discard message in wrong sizes
 			return
 		} else {
@@ -267,7 +271,6 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 		}
 
 		if msg.message.Checksum != calculateCheckSum(msg.message.ConnID, msg.message.SeqNum, msg.message.Size, msg.message.Payload) {
-			//fmt.Printf("Server: msg wrong checksum. Expected checksum = %d, actual checksum = %d\n", msg.message.Checksum, calculateCheckSum(msg.message.ConnID, msg.message.SeqNum, msg.message.Size, msg.message.Payload))
 			//discard message with wrong checksum
 			return
 		}
@@ -342,19 +345,30 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 // send the message to the receivedChan channel and later processed
 // by the mainRoutine
 func (s *server) readRoutine() {
+	defer func() {
+		if a := recover(); a != nil {
+			<-s.readRoutineCloseChan
+		}
+	}()
+
 	for {
-		payload := make([]byte, 2048)
-		n, addr, err := s.conn.ReadFromUDP(payload)
-		payload = payload[0:n]
-		if err != nil {
-			continue
+		select {
+		case <-s.readRoutineCloseChan:
+			return
+		default:
+			payload := make([]byte, 2048)
+			n, addr, err := s.conn.ReadFromUDP(payload)
+			if err != nil {
+				continue
+			}
+			payload = payload[0:n]
+			var message Message
+			err = json.Unmarshal(payload, &message)
+			if err != nil {
+				continue
+			}
+			s.receivedChan <- &messageWithAddr{message: &message, addr: addr}
 		}
-		var message Message
-		err = json.Unmarshal(payload, &message)
-		if err != nil {
-			continue
-		}
-		s.receivedChan <- &messageWithAddr{message: &message, addr: addr}
 	}
 }
 
@@ -373,9 +387,15 @@ func (s *server) messageBufferRoutine() {
 				s.unreadMessages = s.unreadMessages[1:]
 			} else {
 				//if the unread buffer is empty, block here until next unread message arrives
-				msg := <-s.nextUnbufferedMsgChan
-				s.replyReadMessageChan <- msg
+				select {
+				case <-s.messageBufRoutineCloseChan:
+					return
+				case msg := <-s.nextUnbufferedMsgChan:
+					s.replyReadMessageChan <- msg
+				}
 			}
+		case <-s.messageBufRoutineCloseChan:
+			return
 		}
 	}
 }
@@ -383,14 +403,22 @@ func (s *server) messageBufferRoutine() {
 // writeAckRoutine is responsible for writing ACK messages to the server
 func (s *server) writeAckRoutine() {
 	for {
-		message := <-s.writeAckChan
-		payload, err := json.Marshal(message.message)
-		if err != nil {
-			continue
-		}
-		_, err = s.conn.WriteToUDP(payload, message.addr)
-		if err != nil {
-			continue
+		select {
+		case <-s.writeAckRoutineCloseChan:
+			return
+		default:
+			message, ok := <-s.writeAckChan
+			if !ok {
+				continue
+			}
+			payload, err := json.Marshal(message.message)
+			if err != nil {
+				continue
+			}
+			_, err = s.conn.WriteToUDP(payload, message.addr)
+			if err != nil {
+				continue
+			}
 		}
 	}
 }
@@ -407,7 +435,6 @@ func (s *server) Read() (int, []byte, error) {
 	if message.Payload != nil {
 		return message.ConnID, message.Payload, nil
 	} else {
-		//fmt.Println("one client dropped")
 		return message.ConnID, nil, errors.New("one client dropped")
 	}
 }
@@ -426,7 +453,6 @@ func (s *server) Write(connId int, payload []byte) error {
 }
 
 func (s *server) CloseConn(connId int) error {
-	//fmt.Println("close con start", connId)
 	if s.isClosed {
 		return errors.New("the server has been already closed")
 	}
@@ -434,18 +460,12 @@ func (s *server) CloseConn(connId int) error {
 	if !<-s.closeConnReplyChan {
 		return errors.New("channel does not exist")
 	}
-	//fmt.Println("close con ends", connId)
 	return nil
 }
 
 func (s *server) Close() error {
 	s.isClosed = true
 	s.closeServerSignalChan <- struct{}{}
-
-	//todo close conn
-	//todo remove all prints
-	//todo add comment
-
 	if <-s.closeServerSuccessChan {
 		return nil
 	} else {
