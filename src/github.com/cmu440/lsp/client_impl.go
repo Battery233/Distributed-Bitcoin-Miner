@@ -39,6 +39,7 @@ type client struct {
 	messageBufRoutineCloseChan chan struct{}
 	closedSuccessfullyChan     chan struct{}
 	isClosed                   bool
+	serverTimeoutChan          chan struct{}
 	params                     *Params
 }
 
@@ -94,6 +95,7 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		make(chan struct{}),
 		make(chan struct{}),
 		false,
+		make(chan struct{}),
 		params,
 	}
 
@@ -208,7 +210,8 @@ func (c *client) mainRoutine() {
 			}
 			c.alreadyHeardInEpoch = false
 			if c.lastEpochHeardFromServer == c.params.EpochLimit {
-				//todo consider the server is dead
+				c.serverTimeoutChan <- struct{}{}
+				break
 			}
 
 			for _, element := range c.unackedBuf {
@@ -397,8 +400,12 @@ func (c *client) messageBufferRoutine() {
 				c.unreadMessages = c.unreadMessages[1:]
 			} else {
 				//if the unread buffer is empty, block here until next unread message arrives
-				msg := <-c.nextUnbufferedMsgChan
-				c.replyReadMessageChan <- msg
+				select {
+				case msg := <-c.nextUnbufferedMsgChan:
+					c.replyReadMessageChan <- msg
+				case <-c.serverTimeoutChan:
+					c.replyReadMessageChan <- &Message{}
+				}
 			}
 		case <-c.messageBufRoutineCloseChan:
 			return
@@ -439,7 +446,11 @@ func (c *client) Read() ([]byte, error) {
 	//todo return error properly
 	c.requestReadMessageChan <- struct{}{}
 	msg := <-c.replyReadMessageChan
-	return msg.Payload, nil
+	if msg.Payload != nil {
+		return msg.Payload, nil
+	}else{
+		return nil, errors.New("the server is lost")
+	}
 }
 
 // Write writes a message payload to the server via a message with type "data"
