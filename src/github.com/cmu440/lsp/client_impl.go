@@ -10,35 +10,35 @@ import (
 )
 
 type client struct {
-	conn                       *lspnet.UDPConn // connection object between client and server
-	connID                     int
+	conn                       *lspnet.UDPConn         // connection object between client and server
+	connID                     int                     // connection id returned from Server
 	incomingSeq                int                     // the next sequence number that client should receive from server
 	bufferedMsg                map[int]*Message        // buffer for incoming unsorted messages
 	outGoingSeq                int                     // the next sequence number that client should send to server
 	unackedBuf                 map[int]*unAckedMessage // the map for storing sent but not acked data
-	outgoingBuf                []*Message              //the buffer to store messages that cannot be sent under sliding window protocol
-	oldestUnackedSeq           int                     //the oldest ack number we haven't received yet
-	unrecordedAckBuf           map[int]bool            //a map to store the acks we already received but not added to the oldestUnackedSeq yet
+	outgoingBuf                []*Message              // the buffer to store messages that cannot be sent under sliding window protocol
+	oldestUnackedSeq           int                     // the oldest ack number we haven't received yet
+	unrecordedAckBuf           map[int]bool            // a map to store the acks we already received but not added to the oldestUnackedSeq yet
 	receivedChan               chan *Message           // channel for transferring received message object
 	unreadMessages             []*Message              // cache for storing all unread messages
 	nextUnbufferedMsgChan      chan *Message           // channel for transferring the message to buffer into the unreadMessages cache
 	requestReadMessageChan     chan struct{}           // channel for requesting to read a new message from cache
 	replyReadMessageChan       chan *Message           // channel for replying the read cache request
 	writeAckChan               chan *Message           // channel for replying ACK message
-	alreadySentInEpoch         bool                    //bool for showing if the message was sent during the last epoch
-	alreadyHeardInEpoch        bool                    //bool for showing if the heartbeat was sent during the last epoch
-	lastEpochHeardFromServer   int                     //int for recoding last time a message is heard from the server
-	writeDataChan              chan []byte             //channel for writing outgoing data
-	writeDataResultChan        chan bool               //channel for returning the result of write
-	readRoutineCloseChan       chan struct{}
-	mainRoutineCloseChan       chan struct{}
-	writeAckRoutineCloseChan   chan struct{}
-	messageBufRoutineCloseChan chan struct{}
-	closedSuccessfullyChan     chan struct{}
-	isClosed                   bool
-	isServerLost               bool
-	serverTimeoutChan          chan struct{}
-	params                     *Params
+	alreadySentInEpoch         bool                    // bool for showing if the message was sent during the last epoch
+	alreadyHeardInEpoch        bool                    // bool for showing if the heartbeat was sent during the last epoch
+	lastEpochHeardFromServer   int                     // int for recoding last time a message is heard from the server
+	writeDataChan              chan []byte             // channel for writing outgoing data
+	writeDataResultChan        chan bool               // channel for returning the result of write
+	readRoutineCloseChan       chan struct{}           // channel for closing the readRoutine
+	mainRoutineCloseChan       chan struct{}           // channel for closing the mainRoutine
+	writeAckRoutineCloseChan   chan struct{}           // channel for closing the writeAckRouting
+	messageBufRoutineCloseChan chan struct{}           // channel for closing the messageBufferRoutine
+	closedSuccessfullyChan     chan struct{}           // channel for notifying all routines have been closed successfully
+	isClosed                   bool                    // a flag indicating whether the Close method has been called before
+	isServerLost               bool                    // a flag indicating whether the connection the Server has been lost
+	serverTimeoutChan          chan struct{}           // channel for notifying the connection to the Server has been lost
+	params                     *Params                 // all configuration parameters
 }
 
 // NewClient creates, initiates, and returns a new client. This function
@@ -110,6 +110,7 @@ func NewClient(hostport string, params *Params) (Client, error) {
 	}
 
 Connect:
+	// Connect loop handles all logic related to slow start server and re-transmit the MsgConnect message.
 	for {
 		select {
 		case <-ticker.C:
@@ -125,6 +126,7 @@ Connect:
 				return nil, err
 			}
 		case msg := <-newClient.receivedChan:
+			// heard back from server
 			if msg.Type != MsgAck || msg.SeqNum != 0 {
 				break
 			}
@@ -146,23 +148,26 @@ func (c *client) ConnID() int {
 }
 
 // mainRoutine mainly listens for different message types received
-// from the recievedChan, and performs different tasks based on it.
+// from the receivedChan, and performs different tasks based on it.
 func (c *client) mainRoutine() {
+	// ticker is used for firing events during each epoch
 	ticker := time.NewTicker(time.Millisecond * time.Duration(c.params.EpochMillis))
 	defer ticker.Stop()
 	closed := false
 	for {
-		allBufclearedBeforeClose := false
+		allBufClearedBeforeClose := false
 		select {
 		case <-c.mainRoutineCloseChan:
+			// signal other cases, wait until all buffered messages have been sent and read, then terminate the routine
 			closed = true
 			if len(c.outgoingBuf) == 0 && len(c.unackedBuf) == 0 {
-				allBufclearedBeforeClose = true
+				allBufClearedBeforeClose = true
 			}
 		case message := <-c.receivedChan:
-			allBufclearedBeforeClose = clientProcessMessage(c, message, closed)
+			allBufClearedBeforeClose = clientProcessMessage(c, message, closed)
 		case payload := <-c.writeDataChan:
 			if closed {
+				// if connection is closed and we get further write messages, simply ignore
 				c.writeDataResultChan <- false
 				continue
 			}
@@ -193,6 +198,7 @@ func (c *client) mainRoutine() {
 			c.writeDataResultChan <- true
 
 		case <-ticker.C:
+			// epoch case
 			if c.alreadySentInEpoch {
 				c.alreadySentInEpoch = false
 			} else {
@@ -204,12 +210,14 @@ func (c *client) mainRoutine() {
 			}
 			c.alreadyHeardInEpoch = false
 			if c.lastEpochHeardFromServer == c.params.EpochLimit {
+				// if we haven't heard back from server in params.EpochLimit epochs, signal the timeout channel
+				// and terminate the connection
 				c.serverTimeoutChan <- struct{}{}
 				break
 			}
 
 			for _, element := range c.unackedBuf {
-				if element.currentBackoff == element.epochCounter {
+				if element.currentBackoff == element.epochCounter { // if backoff has reached, time to send the message again
 					payload, err := json.Marshal(element.message)
 					if err != nil {
 						continue
@@ -226,13 +234,13 @@ func (c *client) mainRoutine() {
 					} else {
 						element.currentBackoff *= 2
 					}
-				} else {
+				} else { // otherwise, simply increment the backoff counter
 					element.epochCounter++
 				}
 			}
 		}
 
-		if allBufclearedBeforeClose { //time to close everything
+		if allBufClearedBeforeClose { //time to close everything
 			c.conn.Close()
 			c.messageBufRoutineCloseChan <- struct{}{}
 			close(c.receivedChan)
@@ -245,7 +253,8 @@ func (c *client) mainRoutine() {
 	}
 }
 
-// clientProcessMessage returns true if the Close function is called and buffers have been cleared
+// clientProcessMessage handles all message received from the server.
+// this method returns true if the Close function is called and buffers have been cleared, and returns false otherwise.
 func clientProcessMessage(c *client, message *Message, closed bool) bool {
 	switch message.Type {
 	case MsgData:
@@ -258,7 +267,8 @@ func clientProcessMessage(c *client, message *Message, closed bool) bool {
 		if message.Size > len(message.Payload) {
 			// size is wrong, data is corrupted, should ignore
 			return false
-		} else { //trim message
+		} else {
+			// trim message
 			message.Payload = message.Payload[0:message.Size]
 		}
 
@@ -290,13 +300,13 @@ func clientProcessMessage(c *client, message *Message, closed bool) bool {
 				break
 			}
 		}
-		c.lastEpochHeardFromServer = 0
+		c.lastEpochHeardFromServer = 0 // reset this because we already heard back from server in this epoch
 		c.alreadyHeardInEpoch = true
 	case MsgAck:
-		if message.SeqNum == 0 { //if it is a heartbeat message
+		if message.SeqNum == 0 { // if it is a heartbeat message
 			c.lastEpochHeardFromServer = 0
 			c.alreadyHeardInEpoch = true
-		} else {
+		} else { // ack for a MsgData message
 			delete(c.unackedBuf, message.SeqNum)
 			if message.SeqNum >= c.oldestUnackedSeq {
 				c.unrecordedAckBuf[message.SeqNum] = true
@@ -311,7 +321,9 @@ func clientProcessMessage(c *client, message *Message, closed bool) bool {
 				}
 			}
 
-			for len(c.outgoingBuf) > 0 && len(c.unackedBuf) < c.params.MaxUnackedMessages && c.outgoingBuf[0].SeqNum < c.oldestUnackedSeq+c.params.WindowSize {
+			for len(c.outgoingBuf) > 0 &&
+				len(c.unackedBuf) < c.params.MaxUnackedMessages &&
+				c.outgoingBuf[0].SeqNum < c.oldestUnackedSeq+c.params.WindowSize {
 				data := c.outgoingBuf[0]
 				c.outgoingBuf = c.outgoingBuf[1:]
 				c.unackedBuf[data.SeqNum] = &unAckedMessage{
@@ -334,6 +346,9 @@ func clientProcessMessage(c *client, message *Message, closed bool) bool {
 // send the message to the receivedChan channel and later processed
 // by the mainRoutine
 func (c *client) readRoutine() {
+	// we close this routine by calling `close` to the receivedChan channel, but this routine
+	// will attempt to write to that channel, therefore there will be a panic. By handling
+	// the panic we terminate the routine.
 	defer func() {
 		if a := recover(); a != nil {
 			<-c.readRoutineCloseChan
@@ -377,7 +392,7 @@ func (c *client) messageBufferRoutine() {
 				c.replyReadMessageChan <- c.unreadMessages[0]
 				c.unreadMessages = c.unreadMessages[1:]
 			} else {
-				//if the unread buffer is empty, block here until next unread message arrives
+				// if the unread buffer is empty, block here until next unread message arrives
 				select {
 				case msg := <-c.nextUnbufferedMsgChan:
 					c.replyReadMessageChan <- msg
