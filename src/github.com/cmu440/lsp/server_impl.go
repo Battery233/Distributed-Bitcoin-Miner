@@ -24,6 +24,10 @@ type server struct {
 	params                 *Params               //config params
 	writeDataChan          chan *payloadWithId   //channel for writing outgoing data
 	writeDataResultChan    chan bool             //channel for returning the result of write
+	closeConnChannel       chan int
+	closeConnReplyChan     chan bool
+	isClosed               bool
+	droppedClientChan      chan int
 }
 
 type clientInfo struct {
@@ -38,6 +42,7 @@ type clientInfo struct {
 	outgoingBuf              []*Message   //the buffer to store messages that cannot be sent under sliding window protocol
 	oldestUnackedSeq         int          //the oldest ack number we haven't received yet
 	unrecordedAckBuf         map[int]bool //a map to store the acks we already received but not added to the oldestUnackedSeq yet
+	isClosed                 bool         //is the client supposed to be closed
 }
 
 type messageWithAddr struct {
@@ -78,10 +83,14 @@ func NewServer(port int, params *Params) (Server, error) {
 		params,
 		make(chan *payloadWithId),
 		make(chan bool),
+		make(chan int),
+		make(chan bool),
+		false,
+		make(chan int),
 	}
 
 	go newServer.readRoutine()
-	go newServer.MainRoutine()
+	go newServer.mainRoutine()
 	go newServer.writeAckRoutine()
 	go newServer.messageBufferRoutine()
 
@@ -90,14 +99,32 @@ func NewServer(port int, params *Params) (Server, error) {
 
 // mainRoutine mainly listens for different message types received
 // from the recievedChan, and performs different tasks based on it.
-func (s *server) MainRoutine() {
+func (s *server) mainRoutine() {
 	ticker := time.NewTicker(time.Millisecond * time.Duration(s.params.EpochMillis))
 	defer ticker.Stop()
 	for {
 		select {
 		case msg := <-s.receivedChan:
 			serverProcessMessage(s, msg)
+
+		case connId := <-s.closeConnChannel:
+			info := s.clientMap[connId]
+			if info == nil {
+				s.closeConnReplyChan <- false
+			} else {
+				s.closeConnReplyChan <- true
+			}
+			if len(info.unackedBuf) == 0 && len(info.outgoingBuf) == 0 {
+				delete(s.clientMap, connId)
+			} else {
+				info.isClosed = true
+			}
+
 		case writeData := <-s.writeDataChan:
+			if s.clientMap[writeData.id] == nil {
+				s.writeDataResultChan <- false
+				continue
+			}
 			payload := writeData.payload
 			connId := writeData.id
 			outGoingSeq := s.clientMap[connId].nextServerSeq
@@ -136,16 +163,20 @@ func (s *server) MainRoutine() {
 					client.alreadySentInEpoch = false
 				} else {
 					s.writeAckChan <- &messageWithAddr{NewAck(id, 0), &client.remoteAddr} //send the heartbeat ack here
+					fmt.Println("Server heartbeat", client.lastEpochHeardFromClient)
 				}
 
-				if client.alreadyHeardInEpoch {
-					client.alreadySentInEpoch = false
-				} else {
+				if !client.alreadyHeardInEpoch {
 					client.lastEpochHeardFromClient++
 				}
 
+				client.alreadyHeardInEpoch = false
+
 				if client.lastEpochHeardFromClient == s.params.EpochLimit {
-					//todo consider the client is dead
+					//todo check if it is correct
+					fmt.Printf("no heartbeat. Deleted client: %v\n", id)
+					delete(s.clientMap, id)
+					s.droppedClientChan <- id
 					continue
 				}
 
@@ -199,6 +230,7 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 			make([]*Message, 0),
 			1,
 			make(map[int]bool),
+			false,
 		}
 		s.writeAckChan <- &messageWithAddr{NewAck(id, 0), msg.addr}
 		s.clientMap[id].nextClientSeq++
@@ -244,6 +276,9 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 	case MsgAck:
 		message := msg.message
 		c := s.clientMap[msg.message.ConnID] //client
+		if c == nil {
+			return
+		}
 		if message.SeqNum == 0 {
 			c.lastEpochHeardFromClient = 0
 			c.alreadyHeardInEpoch = true
@@ -284,6 +319,13 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 			}
 		}
 	}
+
+	info := s.clientMap[msg.message.ConnID]
+	if info != nil && info.isClosed &&
+		len(info.outgoingBuf) == 0 &&
+		len(info.unackedBuf) == 0 {
+		delete(s.clientMap, msg.message.ConnID)
+	}
 }
 
 // readRoutine is responsible for read messages from clients and
@@ -308,6 +350,7 @@ func (s *server) readRoutine() {
 
 // messageBufferRoutine is responsible for responding data messages to clients.
 func (s *server) messageBufferRoutine() {
+	droppedClients := make([]int, 0)
 	for {
 		select {
 		case msg := <-s.nextUnbufferedMsgChan:
@@ -315,15 +358,29 @@ func (s *server) messageBufferRoutine() {
 			// and wait until the the read method is called
 			s.unreadMessages = append(s.unreadMessages, msg)
 		case <-s.requestReadMessageChan:
-			if len(s.unreadMessages) > 0 {
+			if len(droppedClients) > 0 {
+				s.replyReadMessageChan <- &Message{
+					ConnID: droppedClients[0],
+				}
+				droppedClients = droppedClients[1:]
+			} else if len(s.unreadMessages) > 0 {
 				// if there's cached messages, simply send the first one back
 				s.replyReadMessageChan <- s.unreadMessages[0]
 				s.unreadMessages = s.unreadMessages[1:]
 			} else {
 				//if the unread buffer is empty, block here until next unread message arrives
-				msg := <-s.nextUnbufferedMsgChan
-				s.replyReadMessageChan <- msg
+				select {
+				case msg := <-s.nextUnbufferedMsgChan:
+					s.replyReadMessageChan <- msg
+				case id := <-s.droppedClientChan:
+					s.replyReadMessageChan<-&Message{
+						ConnID: id,
+					}
+				}
 			}
+		case id := <-s.droppedClientChan:
+			fmt.Printf("Client %v has been dropped\n", id)
+			droppedClients = append(droppedClients, id)
 		}
 	}
 }
@@ -350,7 +407,12 @@ func (s *server) Read() (int, []byte, error) {
 	//todo return error properly
 	s.requestReadMessageChan <- struct{}{}
 	message := <-s.replyReadMessageChan
-	return message.ConnID, message.Payload, nil
+	if message.Payload != nil {
+		return message.ConnID, message.Payload, nil
+	} else {
+		fmt.Println("one client dropped")
+		return message.ConnID, nil, errors.New("one client dropped")
+	}
 }
 
 // Write writes a message payload to a client via a message with type "data" and id
@@ -364,9 +426,19 @@ func (s *server) Write(connId int, payload []byte) error {
 }
 
 func (s *server) CloseConn(connId int) error {
-	return errors.New("not yet implemented")
+	fmt.Println("close con start", connId)
+	if s.isClosed {
+		return errors.New("the server has been already closed")
+	}
+	s.closeConnChannel <- connId
+	if !<-s.closeConnReplyChan {
+		return errors.New("channel does not exist")
+	}
+	fmt.Println("close con ends", connId)
+	return nil
 }
 
 func (s *server) Close() error {
+	s.isClosed = true
 	return errors.New("not yet implemented")
 }

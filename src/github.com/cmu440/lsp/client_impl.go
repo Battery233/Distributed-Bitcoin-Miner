@@ -13,27 +13,33 @@ import (
 //todo remove all prints
 
 type client struct {
-	conn                     *lspnet.UDPConn // connection object between client and server
-	connID                   int
-	incomingSeq              int                     // the next sequence number that client should receive from server
-	bufferedMsg              map[int]*Message        // buffer for incoming unsorted messages
-	outGoingSeq              int                     // the next sequence number that client should send to server
-	unackedBuf               map[int]*unAckedMessage // the map for storing sent but not acked data
-	outgoingBuf              []*Message              //the buffer to store messages that cannot be sent under sliding window protocol
-	oldestUnackedSeq         int                     //the oldest ack number we haven't received yet
-	unrecordedAckBuf         map[int]bool            //a map to store the acks we already received but not added to the oldestUnackedSeq yet
-	receivedChan             chan *Message           // channel for transferring received message object
-	unreadMessages           []*Message              // cache for storing all unread messages
-	nextUnbufferedMsgChan    chan *Message           // channel for transferring the message to buffer into the unreadMessages cache
-	requestReadMessageChan   chan struct{}           // channel for requesting to read a new message from cache
-	replyReadMessageChan     chan *Message           // channel for replying the read cache request
-	writeAckChan             chan *Message           // channel for replying ACK message
-	alreadySentInEpoch       bool                    //bool for showing if the message was sent during the last epoch
-	alreadyHeardInEpoch      bool                    //bool for showing if the heartbeat was sent during the last epoch
-	lastEpochHeardFromServer int                     //int for recoding last time a message is heard from the server
-	writeDataChan            chan []byte             //channel for writing outgoing data
-	writeDataResultChan      chan bool               //channel for returning the result of write
-	params                   *Params
+	conn                       *lspnet.UDPConn // connection object between client and server
+	connID                     int
+	incomingSeq                int                     // the next sequence number that client should receive from server
+	bufferedMsg                map[int]*Message        // buffer for incoming unsorted messages
+	outGoingSeq                int                     // the next sequence number that client should send to server
+	unackedBuf                 map[int]*unAckedMessage // the map for storing sent but not acked data
+	outgoingBuf                []*Message              //the buffer to store messages that cannot be sent under sliding window protocol
+	oldestUnackedSeq           int                     //the oldest ack number we haven't received yet
+	unrecordedAckBuf           map[int]bool            //a map to store the acks we already received but not added to the oldestUnackedSeq yet
+	receivedChan               chan *Message           // channel for transferring received message object
+	unreadMessages             []*Message              // cache for storing all unread messages
+	nextUnbufferedMsgChan      chan *Message           // channel for transferring the message to buffer into the unreadMessages cache
+	requestReadMessageChan     chan struct{}           // channel for requesting to read a new message from cache
+	replyReadMessageChan       chan *Message           // channel for replying the read cache request
+	writeAckChan               chan *Message           // channel for replying ACK message
+	alreadySentInEpoch         bool                    //bool for showing if the message was sent during the last epoch
+	alreadyHeardInEpoch        bool                    //bool for showing if the heartbeat was sent during the last epoch
+	lastEpochHeardFromServer   int                     //int for recoding last time a message is heard from the server
+	writeDataChan              chan []byte             //channel for writing outgoing data
+	writeDataResultChan        chan bool               //channel for returning the result of write
+	readRoutineCloseChan       chan struct{}
+	mainRoutineCloseChan       chan struct{}
+	writeAckRoutineCloseChan   chan struct{}
+	messageBufRoutineCloseChan chan struct{}
+	closedSuccessfullyChan     chan struct{}
+	isClosed                   bool
+	params                     *Params
 }
 
 // NewClient creates, initiates, and returns a new client. This function
@@ -50,12 +56,14 @@ func NewClient(hostport string, params *Params) (Client, error) {
 	addr, err := lspnet.ResolveUDPAddr("udp", hostport)
 	conn, err := lspnet.DialUDP("udp", nil, addr)
 	if err != nil {
+		conn.Close()
 		return nil, err
 	}
 
 	// construct a new "connect" message and serialize it
 	payload, err := json.Marshal(NewConnect())
 	if err != nil {
+		conn.Close()
 		return nil, err
 	}
 
@@ -80,6 +88,12 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		0,
 		make(chan []byte),
 		make(chan bool),
+		make(chan struct{}),
+		make(chan struct{}),
+		make(chan struct{}),
+		make(chan struct{}),
+		make(chan struct{}),
+		false,
 		params,
 	}
 
@@ -90,6 +104,7 @@ func NewClient(hostport string, params *Params) (Client, error) {
 	connectCounter := 1
 	_, err = conn.Write(payload)
 	if err != nil {
+		conn.Close()
 		return nil, err
 	}
 
@@ -99,10 +114,13 @@ Connect:
 		case <-ticker.C:
 			connectCounter++
 			if connectCounter > params.EpochLimit {
+				// if cannot connect to the server after many epochs, close connection.
+				conn.Close()
 				return nil, errors.New("connect failed")
 			}
 			_, err = conn.Write(payload)
 			if err != nil {
+				conn.Close()
 				return nil, err
 			}
 		case msg := <-newClient.receivedChan:
@@ -131,12 +149,22 @@ func (c *client) ConnID() int {
 func (c *client) mainRoutine() {
 	ticker := time.NewTicker(time.Millisecond * time.Duration(c.params.EpochMillis))
 	defer ticker.Stop()
+	closed := false
 	for {
+		allBufclearedBeforeClose := false
 		select {
+		case <-c.mainRoutineCloseChan:
+			closed = true
+			if len(c.outgoingBuf) == 0 && len(c.unackedBuf) == 0 {
+				allBufclearedBeforeClose = true
+			}
 		case message := <-c.receivedChan:
-			clientProcessMessage(c, message)
-
+			allBufclearedBeforeClose = clientProcessMessage(c, message, closed)
 		case payload := <-c.writeDataChan:
+			if closed {
+				c.writeDataResultChan <- false
+				continue
+			}
 			// outGoingSeq is responsible for tracking the correct sequence number
 			// currently for the client to send to the server. Since we are sending
 			// a new message to the server, we should increment it by 1.
@@ -175,12 +203,10 @@ func (c *client) mainRoutine() {
 				c.writeAckChan <- NewAck(c.connID, 0) // heart beat is sent here
 			}
 
-			if c.alreadyHeardInEpoch {
-				c.alreadySentInEpoch = false
-			} else {
+			if !c.alreadyHeardInEpoch {
 				c.lastEpochHeardFromServer++
 			}
-
+			c.alreadyHeardInEpoch = false
 			if c.lastEpochHeardFromServer == c.params.EpochLimit {
 				//todo consider the server is dead
 			}
@@ -208,18 +234,39 @@ func (c *client) mainRoutine() {
 				}
 			}
 		}
+
+		if allBufclearedBeforeClose { //time to close everything
+			fmt.Println("allBufclearedBeforeClose")
+			c.messageBufRoutineCloseChan <- struct{}{}
+			fmt.Println("step 1")
+			close(c.receivedChan)
+			c.readRoutineCloseChan <- struct{}{}
+			fmt.Println("step 2")
+			close(c.writeAckChan)
+			c.writeAckRoutineCloseChan <- struct{}{}
+			fmt.Println("step 3")
+			c.closedSuccessfullyChan <- struct{}{}
+			fmt.Println("step 4")
+
+			return
+		}
 	}
 }
 
-func clientProcessMessage(c *client, message *Message) {
+// clientProcessMessage returns true if the Close function is called and buffers have been cleared
+func clientProcessMessage(c *client, message *Message, closed bool) bool {
 	switch message.Type {
 	case MsgData:
+		if closed {
+			//ignore data message
+			return false
+		}
 		seq := message.SeqNum
 
 		if message.Size > len(message.Payload) {
 			fmt.Printf("Client: msg wrong size. Expected size = %d, actual size = %d\n", message.Size, len(message.Payload))
 			// size is wrong, data is corrupted, should ignore
-			return
+			return false
 		} else { //trim message
 			message.Payload = message.Payload[0:message.Size]
 		}
@@ -227,7 +274,7 @@ func clientProcessMessage(c *client, message *Message) {
 		if message.Checksum != calculateCheckSum(message.ConnID, message.SeqNum, message.Size, message.Payload) {
 			// data is corrupted, simply ignore the corrupted data
 			fmt.Printf("Client: msg wrong checksum. Expected checksum = %d, actual checksum = %d\n", message.Checksum, calculateCheckSum(message.ConnID, message.SeqNum, message.Size, message.Payload))
-			return
+			return false
 		}
 
 		c.writeAckChan <- NewAck(c.connID, seq)
@@ -236,7 +283,7 @@ func clientProcessMessage(c *client, message *Message) {
 			// the expected incoming sequence number, then we are sure that
 			// this is a resent message that has already been responded, therefore
 			// we just ignore the message
-			return
+			return false
 		}
 		// store message into the buffered message map, and associate the value
 		// with the received sequence number
@@ -297,27 +344,39 @@ func clientProcessMessage(c *client, message *Message) {
 			}
 		}
 	default:
-		return
+		return false
 	}
+	return len(c.outgoingBuf) == 0 && len(c.unackedBuf) == 0 && closed
 }
 
 // readRoutine is responsible for read messages from the server and
 // send the message to the receivedChan channel and later processed
 // by the mainRoutine
 func (c *client) readRoutine() {
+	defer func() {
+		if a := recover(); a != nil {
+			<-c.readRoutineCloseChan
+		}
+	}()
+
 	for {
-		payload := make([]byte, 2048)
-		n, err := c.conn.Read(payload)
-		payload = payload[0:n]
-		if err != nil {
-			continue
+		select {
+		case <-c.readRoutineCloseChan:
+			return
+		default:
+			payload := make([]byte, 2048)
+			n, err := c.conn.Read(payload)
+			payload = payload[0:n]
+			if err != nil {
+				continue
+			}
+			var message Message
+			err = json.Unmarshal(payload, &message)
+			if err != nil {
+				continue
+			}
+			c.receivedChan <- &message
 		}
-		var message Message
-		err = json.Unmarshal(payload, &message)
-		if err != nil {
-			continue
-		}
-		c.receivedChan <- &message
 	}
 }
 
@@ -341,6 +400,8 @@ func (c *client) messageBufferRoutine() {
 				msg := <-c.nextUnbufferedMsgChan
 				c.replyReadMessageChan <- msg
 			}
+		case <-c.messageBufRoutineCloseChan:
+			return
 		}
 	}
 }
@@ -348,14 +409,22 @@ func (c *client) messageBufferRoutine() {
 // writeAckRoutine is responsible for writing ACK messages to the server
 func (c *client) writeAckRoutine() {
 	for {
-		message := <-c.writeAckChan
-		payload, err := json.Marshal(message)
-		if err != nil {
-			continue
-		}
-		_, err = c.conn.Write(payload)
-		if err != nil {
-			continue
+		select {
+		case <-c.writeAckRoutineCloseChan:
+			return
+		default:
+			message, ok := <-c.writeAckChan
+			if !ok {
+				continue
+			}
+			payload, err := json.Marshal(message)
+			if err != nil {
+				continue
+			}
+			_, err = c.conn.Write(payload)
+			if err != nil {
+				continue
+			}
 		}
 	}
 }
@@ -364,6 +433,9 @@ func (c *client) writeAckRoutine() {
 // that we want a new message from our cache, and listen to replyReadMessageChan
 // for the corresponding message value
 func (c *client) Read() ([]byte, error) {
+	if c.isClosed {
+		return nil, errors.New("client has been already closed")
+	}
 	//todo return error properly
 	c.requestReadMessageChan <- struct{}{}
 	msg := <-c.replyReadMessageChan
@@ -381,5 +453,13 @@ func (c *client) Write(payload []byte) error {
 }
 
 func (c *client) Close() error {
-	return errors.New("not yet implemented")
+	if c.isClosed {
+		return errors.New("client has been already closed")
+	}
+	c.mainRoutineCloseChan <- struct{}{}
+	close(c.mainRoutineCloseChan)
+	<-c.closedSuccessfullyChan
+	fmt.Printf("Client %d closed\n", c.ConnID())
+	c.isClosed = true
+	return c.conn.Close()
 }
