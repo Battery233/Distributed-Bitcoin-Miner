@@ -10,8 +10,6 @@ import (
 	"time"
 )
 
-//todo remove all prints
-
 type client struct {
 	conn                       *lspnet.UDPConn // connection object between client and server
 	connID                     int
@@ -236,17 +234,13 @@ func (c *client) mainRoutine() {
 		}
 
 		if allBufclearedBeforeClose { //time to close everything
-			fmt.Println("allBufclearedBeforeClose")
+			c.conn.Close()
 			c.messageBufRoutineCloseChan <- struct{}{}
-			fmt.Println("step 1")
 			close(c.receivedChan)
 			c.readRoutineCloseChan <- struct{}{}
-			fmt.Println("step 2")
 			close(c.writeAckChan)
 			c.writeAckRoutineCloseChan <- struct{}{}
-			fmt.Println("step 3")
 			c.closedSuccessfullyChan <- struct{}{}
-			fmt.Println("step 4")
 			return
 		}
 	}
@@ -263,7 +257,7 @@ func clientProcessMessage(c *client, message *Message, closed bool) bool {
 		seq := message.SeqNum
 
 		if message.Size > len(message.Payload) {
-			fmt.Printf("Client: msg wrong size. Expected size = %d, actual size = %d\n", message.Size, len(message.Payload))
+			//fmt.Printf("Client: msg wrong size. Expected size = %d, actual size = %d\n", message.Size, len(message.Payload))
 			// size is wrong, data is corrupted, should ignore
 			return false
 		} else { //trim message
@@ -272,7 +266,7 @@ func clientProcessMessage(c *client, message *Message, closed bool) bool {
 
 		if message.Checksum != calculateCheckSum(message.ConnID, message.SeqNum, message.Size, message.Payload) {
 			// data is corrupted, simply ignore the corrupted data
-			fmt.Printf("Client: msg wrong checksum. Expected checksum = %d, actual checksum = %d\n", message.Checksum, calculateCheckSum(message.ConnID, message.SeqNum, message.Size, message.Payload))
+			//fmt.Printf("Client: msg wrong checksum. Expected checksum = %d, actual checksum = %d\n", message.Checksum, calculateCheckSum(message.ConnID, message.SeqNum, message.Size, message.Payload))
 			return false
 		}
 
@@ -356,10 +350,10 @@ func (c *client) readRoutine() {
 		default:
 			payload := make([]byte, 2048)
 			n, err := c.conn.Read(payload)
-			payload = payload[0:n]
 			if err != nil {
 				continue
 			}
+			payload = payload[0:n]
 			var message Message
 			err = json.Unmarshal(payload, &message)
 			if err != nil {
@@ -463,5 +457,5 @@ func (c *client) Close() error {
 	<-c.closedSuccessfullyChan
 	fmt.Printf("Client %d closed\n", c.ConnID())
 	c.isClosed = true
-	return c.conn.Close()
+	return nil
 }

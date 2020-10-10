@@ -5,7 +5,7 @@ package lsp
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
+	//"fmt"
 	"github.com/cmu440/lspnet"
 	"strconv"
 	"time"
@@ -168,7 +168,7 @@ func (s *server) mainRoutine() {
 					client.alreadySentInEpoch = false
 				} else {
 					s.writeAckChan <- &messageWithAddr{NewAck(id, 0), &client.remoteAddr} //send the heartbeat ack here
-					fmt.Println("Server heartbeat", client.lastEpochHeardFromClient)
+					//fmt.Println("Server heartbeat", client.lastEpochHeardFromClient)
 				}
 
 				if !client.alreadyHeardInEpoch {
@@ -178,7 +178,7 @@ func (s *server) mainRoutine() {
 				client.alreadyHeardInEpoch = false
 
 				if client.lastEpochHeardFromClient == s.params.EpochLimit {
-					fmt.Printf("no heartbeat. Deleted client: %v\n", id)
+					//fmt.Printf("no heartbeat. Deleted client: %v\n", id)
 					delete(s.clientMap, id)
 					// we send an message with nil payload to indicate that the client is lost
 					s.nextUnbufferedMsgChan <- &Message{
@@ -259,7 +259,7 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 		seq := msg.message.SeqNum
 
 		if msg.message.Size > len(msg.message.Payload) {
-			fmt.Printf("Server: msg wrong size. Expected size = %d, actual size = %d\n", msg.message.Size, len(msg.message.Payload))
+			//fmt.Printf("Server: msg wrong size. Expected size = %d, actual size = %d\n", msg.message.Size, len(msg.message.Payload))
 			//discard message in wrong sizes
 			return
 		} else {
@@ -267,7 +267,7 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 		}
 
 		if msg.message.Checksum != calculateCheckSum(msg.message.ConnID, msg.message.SeqNum, msg.message.Size, msg.message.Payload) {
-			fmt.Printf("Server: msg wrong checksum. Expected checksum = %d, actual checksum = %d\n", msg.message.Checksum, calculateCheckSum(msg.message.ConnID, msg.message.SeqNum, msg.message.Size, msg.message.Payload))
+			//fmt.Printf("Server: msg wrong checksum. Expected checksum = %d, actual checksum = %d\n", msg.message.Checksum, calculateCheckSum(msg.message.ConnID, msg.message.SeqNum, msg.message.Size, msg.message.Payload))
 			//discard message with wrong checksum
 			return
 		}
@@ -407,7 +407,7 @@ func (s *server) Read() (int, []byte, error) {
 	if message.Payload != nil {
 		return message.ConnID, message.Payload, nil
 	} else {
-		fmt.Println("one client dropped")
+		//fmt.Println("one client dropped")
 		return message.ConnID, nil, errors.New("one client dropped")
 	}
 }
@@ -426,7 +426,7 @@ func (s *server) Write(connId int, payload []byte) error {
 }
 
 func (s *server) CloseConn(connId int) error {
-	fmt.Println("close con start", connId)
+	//fmt.Println("close con start", connId)
 	if s.isClosed {
 		return errors.New("the server has been already closed")
 	}
@@ -434,7 +434,7 @@ func (s *server) CloseConn(connId int) error {
 	if !<-s.closeConnReplyChan {
 		return errors.New("channel does not exist")
 	}
-	fmt.Println("close con ends", connId)
+	//fmt.Println("close con ends", connId)
 	return nil
 }
 
@@ -443,6 +443,9 @@ func (s *server) Close() error {
 	s.closeServerSignalChan <- struct{}{}
 
 	//todo close conn
+	//todo remove all prints
+	//todo add comment
+
 	if <-s.closeServerSuccessChan {
 		return nil
 	} else {
