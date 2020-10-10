@@ -39,6 +39,7 @@ type client struct {
 	messageBufRoutineCloseChan chan struct{}
 	closedSuccessfullyChan     chan struct{}
 	isClosed                   bool
+	isServerLost               bool
 	serverTimeoutChan          chan struct{}
 	params                     *Params
 }
@@ -94,6 +95,7 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		make(chan struct{}),
 		make(chan struct{}),
 		make(chan struct{}),
+		false,
 		false,
 		make(chan struct{}),
 		params,
@@ -181,14 +183,9 @@ func (c *client) mainRoutine() {
 					0,
 					0,
 				}
-				payload, err := json.Marshal(data)
-				if err != nil {
-					c.writeDataResultChan <- false
-					continue
-				}
-				_, err = c.conn.Write(payload)
-				if err != nil {
-					//todo do what if the server is closed and others
+				payload, err1 := json.Marshal(data)
+				_, err2 := c.conn.Write(payload)
+				if err1 != nil || err2 !=nil {
 					c.writeDataResultChan <- false
 					continue
 				}
@@ -332,17 +329,8 @@ func clientProcessMessage(c *client, message *Message, closed bool) bool {
 					0,
 					0,
 				}
-				payload, err := json.Marshal(data)
-				if err != nil {
-					c.writeDataResultChan <- false
-					continue
-				}
-				_, err = c.conn.Write(payload)
-				if err != nil {
-					//todo do what if the server is closed and others
-					c.writeDataResultChan <- false
-					continue
-				}
+				payload, _ := json.Marshal(data)
+				c.conn.Write(payload)
 				c.alreadySentInEpoch = true
 			}
 		}
@@ -443,24 +431,28 @@ func (c *client) Read() ([]byte, error) {
 	if c.isClosed {
 		return nil, errors.New("client has been already closed")
 	}
-	//todo return error properly
 	c.requestReadMessageChan <- struct{}{}
 	msg := <-c.replyReadMessageChan
 	if msg.Payload != nil {
 		return msg.Payload, nil
-	}else{
+	} else {
+		c.isServerLost = true
 		return nil, errors.New("the server is lost")
 	}
 }
 
 // Write writes a message payload to the server via a message with type "data"
 func (c *client) Write(payload []byte) error {
-	c.writeDataChan <- payload
-	//todo if time out, do something
-	if <-c.writeDataResultChan {
-		return nil
+	if c.isServerLost {
+		return errors.New("the server is lost")
+	} else{
+		c.writeDataChan <- payload
+		if <-c.writeDataResultChan {
+			return nil
+		}else{
+			return errors.New("write data to server error")
+		}
 	}
-	return errors.New("write data to server error")
 }
 
 func (c *client) Close() error {

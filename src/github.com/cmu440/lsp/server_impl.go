@@ -27,7 +27,6 @@ type server struct {
 	closeConnChannel       chan int
 	closeConnReplyChan     chan bool
 	isClosed               bool
-	droppedClientChan      chan int
 }
 
 type clientInfo struct {
@@ -86,7 +85,6 @@ func NewServer(port int, params *Params) (Server, error) {
 		make(chan int),
 		make(chan bool),
 		false,
-		make(chan int),
 	}
 
 	go newServer.readRoutine()
@@ -140,14 +138,9 @@ func (s *server) mainRoutine() {
 					0,
 					0,
 				}
-				payload, err := json.Marshal(data)
-				if err != nil {
-					s.writeDataResultChan <- false
-					continue
-				}
-				_, err = s.conn.WriteToUDP(payload, &c.remoteAddr)
-				if err != nil {
-					//todo do what if the server is closed and others
+				payload, err1 := json.Marshal(data)
+				_, err2 := s.conn.WriteToUDP(payload, &c.remoteAddr)
+				if err1 != nil || err2 != nil {
 					s.writeDataResultChan <- false
 					continue
 				}
@@ -173,10 +166,11 @@ func (s *server) mainRoutine() {
 				client.alreadyHeardInEpoch = false
 
 				if client.lastEpochHeardFromClient == s.params.EpochLimit {
-					//todo check if it is correct
 					fmt.Printf("no heartbeat. Deleted client: %v\n", id)
 					delete(s.clientMap, id)
-					s.droppedClientChan <- id
+					s.nextUnbufferedMsgChan <- &Message{
+						ConnID: id,
+					}
 					continue
 				}
 
@@ -304,17 +298,8 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 					0,
 					0,
 				}
-				payload, err := json.Marshal(data)
-				if err != nil {
-					s.writeDataResultChan <- false
-					continue
-				}
-				_, err = s.conn.WriteToUDP(payload, &c.remoteAddr)
-				if err != nil {
-					//todo do what if the server is closed and others
-					s.writeDataResultChan <- false
-					continue
-				}
+				payload, _ := json.Marshal(data)
+				s.conn.WriteToUDP(payload, &c.remoteAddr)
 				c.alreadySentInEpoch = true
 			}
 		}
@@ -369,18 +354,9 @@ func (s *server) messageBufferRoutine() {
 				s.unreadMessages = s.unreadMessages[1:]
 			} else {
 				//if the unread buffer is empty, block here until next unread message arrives
-				select {
-				case msg := <-s.nextUnbufferedMsgChan:
-					s.replyReadMessageChan <- msg
-				case id := <-s.droppedClientChan:
-					s.replyReadMessageChan<-&Message{
-						ConnID: id,
-					}
-				}
+				msg := <-s.nextUnbufferedMsgChan
+				s.replyReadMessageChan <- msg
 			}
-		case id := <-s.droppedClientChan:
-			fmt.Printf("Client %v has been dropped\n", id)
-			droppedClients = append(droppedClients, id)
 		}
 	}
 }
@@ -404,7 +380,9 @@ func (s *server) writeAckRoutine() {
 // that we want a new message from our cache, and listen to replyReadMessageChan
 // for the corresponding message value
 func (s *server) Read() (int, []byte, error) {
-	//todo return error properly
+	if s.isClosed {
+		return 0, nil, errors.New("server already closed")
+	}
 	s.requestReadMessageChan <- struct{}{}
 	message := <-s.replyReadMessageChan
 	if message.Payload != nil {
@@ -417,12 +395,15 @@ func (s *server) Read() (int, []byte, error) {
 
 // Write writes a message payload to a client via a message with type "data" and id
 func (s *server) Write(connId int, payload []byte) error {
+	if s.isClosed {
+		return errors.New("server already closed")
+	}
 	s.writeDataChan <- &payloadWithId{payload: payload, id: connId}
-	//todo fix this channel here
 	if <-s.writeDataResultChan {
 		return nil
+	} else {
+		return errors.New("write error")
 	}
-	return errors.New("write error")
 }
 
 func (s *server) CloseConn(connId int) error {
