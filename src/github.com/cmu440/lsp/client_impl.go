@@ -462,6 +462,7 @@ func (c *client) Write(payload []byte) error {
 	}
 }
 
+// close the client. Return error if the client is already closed
 func (c *client) Close() error {
 	if c.isClosed {
 		return errors.New("client has been already closed")

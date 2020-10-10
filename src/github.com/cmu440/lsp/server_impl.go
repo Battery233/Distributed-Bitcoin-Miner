@@ -117,7 +117,7 @@ func (s *server) mainRoutine() {
 		case msg := <-s.receivedChan:
 			serverProcessMessage(s, msg)
 
-		case connId := <-s.closeConnChan:
+		case connId := <-s.closeConnChan: //case of closing a client connection
 			info := s.clientMap[connId]
 			if info == nil {
 				s.closeConnReplyChan <- false
@@ -125,6 +125,7 @@ func (s *server) mainRoutine() {
 				s.closeConnReplyChan <- true
 			}
 			if len(info.unackedBuf) == 0 && len(info.outgoingBuf) == 0 {
+				//remove the client only if all buffered messages are sent and acked
 				delete(s.clientMap, connId)
 			} else {
 				info.isClosed = true
@@ -167,7 +168,7 @@ func (s *server) mainRoutine() {
 
 		case <-ticker.C:
 			// epoch case
-			if serverClosed && len(s.clientMap) == 0 {
+			if serverClosed && len(s.clientMap) == 0 { //if the server is ready to shutdown
 				s.conn.Close()
 				s.messageBufRoutineCloseChan <- struct{}{}
 				close(s.receivedChan)
@@ -177,6 +178,7 @@ func (s *server) mainRoutine() {
 				s.closeServerSuccessChan <- serverClosedSuccess
 				return
 			}
+
 			for id, client := range s.clientMap {
 				if client.alreadySentInEpoch {
 					client.alreadySentInEpoch = false
@@ -224,9 +226,11 @@ func (s *server) mainRoutine() {
 					}
 				}
 			}
-		case <-s.closeServerSignalChan:
-			serverClosed = true
+
+		case <-s.closeServerSignalChan: //case of getting signal from the server Close() call
+			serverClosed = true //set the flag here. Closing check will happen at the next epoch
 			for connId, info := range s.clientMap {
+				//closing all connections to the clients first
 				if len(info.unackedBuf) == 0 && len(info.outgoingBuf) == 0 {
 					delete(s.clientMap, connId)
 				} else {
@@ -237,6 +241,7 @@ func (s *server) mainRoutine() {
 	}
 }
 
+// serverProcessMessage handles all message received from the client.
 func serverProcessMessage(s *server, msg *messageWithAddr) {
 	switch msg.message.Type {
 	case MsgConnect: //create a new client information and send ack
@@ -272,7 +277,7 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 		if msg.message.Size > len(msg.message.Payload) {
 			//discard message in wrong sizes
 			return
-		} else {
+		} else { //discard extra bytes
 			msg.message.Payload = msg.message.Payload[0:msg.message.Size]
 		}
 
@@ -324,6 +329,7 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 					break
 				}
 			}
+			//move the sliding window here
 			for len(c.outgoingBuf) > 0 && len(c.unackedBuf) < s.params.MaxUnackedMessages && c.outgoingBuf[0].SeqNum < c.oldestUnackedSeq+s.params.WindowSize {
 				data := c.outgoingBuf[0]
 				c.outgoingBuf = c.outgoingBuf[1:]
@@ -343,6 +349,7 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 	if info != nil && info.isClosed &&
 		len(info.outgoingBuf) == 0 &&
 		len(info.unackedBuf) == 0 {
+		// remove the client from map if the client should be disconnected and messages are sent and acked
 		delete(s.clientMap, msg.message.ConnID)
 	}
 }
@@ -458,6 +465,7 @@ func (s *server) Write(connId int, payload []byte) error {
 	}
 }
 
+//a non-blocking call to close a connection
 func (s *server) CloseConn(connId int) error {
 	if s.isClosed {
 		return errors.New("the server has been already closed")
@@ -469,6 +477,7 @@ func (s *server) CloseConn(connId int) error {
 	return nil
 }
 
+//close the server
 func (s *server) Close() error {
 	s.isClosed = true
 	s.closeServerSignalChan <- struct{}{}

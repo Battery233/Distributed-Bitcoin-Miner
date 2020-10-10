@@ -1,5 +1,6 @@
 package lsp
 
+//a data structure to record unacked messages and their epoch related information
 type unAckedMessage struct {
 	message        *Message
 	currentBackoff int
