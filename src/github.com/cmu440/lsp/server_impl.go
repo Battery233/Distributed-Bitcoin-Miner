@@ -12,45 +12,45 @@ import (
 
 type server struct {
 	receivedChan               chan *messageWithAddr // channel for accepting new messages
-	writeAckChan               chan *messageWithAddr //channel for ack writing
-	unreadMessages             []*Message            //a slice buffer to store all ordered but unread messages
-	nextUnbufferedMsgChan      chan *Message         // a channel to send a new ordered message to the buffer handling routine
-	requestReadMessageChan     chan struct{}         // a signal channel for the read func to request next message
-	replyReadMessageChan       chan *Message         //a channel for replying message to the read func
+	writeAckChan               chan *messageWithAddr // channel for ack writing
+	unreadMessages             []*Message            // slice buffer to store all ordered but unread messages
+	nextUnbufferedMsgChan      chan *Message         // channel to send a new ordered message to the buffer handling routine
+	requestReadMessageChan     chan struct{}         // signal channel for the read func to request next message
+	replyReadMessageChan       chan *Message         // channel for replying message to the read func
 	conn                       *lspnet.UDPConn       // the udp connection
-	clientMap                  map[int]*clientInfo   //a map int->clientId to store the info
-	nextConnId                 int                   //a int to record the id for next incoming client
-	params                     *Params               //config params
-	writeDataChan              chan *payloadWithId   //channel for writing outgoing data
-	writeDataResultChan        chan bool             //channel for returning the result of write
-	closeConnChannel           chan int
-	closeConnReplyChan         chan bool
-	isClosed                   bool
-	closeServerSignalChan      chan struct{}
-	readRoutineCloseChan       chan struct{}
-	writeAckRoutineCloseChan   chan struct{}
-	messageBufRoutineCloseChan chan struct{}
-	closeServerSuccessChan     chan bool
+	clientMap                  map[int]*clientInfo   // map int->clientId to store the info
+	nextConnId                 int                   // int to record the id for next incoming client
+	params                     *Params               // config params
+	writeDataChan              chan *payloadWithId   // channel for writing outgoing data
+	writeDataResultChan        chan bool             // channel for returning the result of write
+	closeConnChan              chan int              // channel for signalling to close a connection with a connID
+	closeConnReplyChan         chan bool             // channel for signalling whether the close was successful
+	isClosed                   bool                  // flag indicating whether the Close method has been called before
+	closeServerSignalChan      chan struct{}         // channel for closing the server
+	readRoutineCloseChan       chan struct{}         // channel for closing the readRoutine
+	writeAckRoutineCloseChan   chan struct{}         // channel for closing the writeAckRoutine
+	messageBufRoutineCloseChan chan struct{}         // channel for closing the messageBufferRoutine
+	closeServerSuccessChan     chan bool             // channel for signalling whether Close was successful
 }
 
 type clientInfo struct {
-	nextClientSeq            int              //the seq num we expect for the next message
-	nextServerSeq            int              //the next seq for the message from the server to client
-	bufferedMsg              map[int]*Message //message buf for this client to store unordered message k,v->seq, message
-	remoteAddr               lspnet.UDPAddr   //udp address
-	unackedBuf               map[int]*unAckedMessage
-	alreadySentInEpoch       bool         //bool for showing if the message was sent during the last epoch
-	alreadyHeardInEpoch      bool         //bool for showing if the heartbeat was sent during the last epoch
-	lastEpochHeardFromClient int          //int for recoding last time a message is heard from the client
-	outgoingBuf              []*Message   //the buffer to store messages that cannot be sent under sliding window protocol
-	oldestUnackedSeq         int          //the oldest ack number we haven't received yet
-	unrecordedAckBuf         map[int]bool //a map to store the acks we already received but not added to the oldestUnackedSeq yet
-	isClosed                 bool         //is the client supposed to be closed
+	nextClientSeq            int                     // seq num we expect for the next message
+	nextServerSeq            int                     // next seq for the message from the server to client
+	bufferedMsg              map[int]*Message        // message buf for this client to store unordered message k,v->seq, message
+	remoteAddr               lspnet.UDPAddr          // udp address
+	unackedBuf               map[int]*unAckedMessage // buffer for storing all messages that have been sent by waiting for ack
+	alreadySentInEpoch       bool                    // bool for showing if the message was sent during the last epoch
+	alreadyHeardInEpoch      bool                    // bool for showing if the heartbeat was sent during the last epoch
+	lastEpochHeardFromClient int                     // int for recoding last time a message is heard from the client
+	outgoingBuf              []*Message              // buffer to store messages that cannot be sent under sliding window protocol
+	oldestUnackedSeq         int                     // oldest ack number we haven't received yet
+	unrecordedAckBuf         map[int]bool            // map to store the acks we already received but not added to the oldestUnackedSeq yet
+	isClosed                 bool                    // is the client supposed to be closed
 }
 
 type messageWithAddr struct {
-	message *Message        //content
-	addr    *lspnet.UDPAddr //address from the sender (will need the address to send the reply message)
+	message *Message        // content
+	addr    *lspnet.UDPAddr // address from the sender (will need the address to send the reply message)
 }
 
 type payloadWithId struct {
@@ -107,6 +107,7 @@ func NewServer(port int, params *Params) (Server, error) {
 // mainRoutine mainly listens for different message types received
 // from the receivedChan, and performs different tasks based on it.
 func (s *server) mainRoutine() {
+	// ticker for handling epoch event
 	ticker := time.NewTicker(time.Millisecond * time.Duration(s.params.EpochMillis))
 	defer ticker.Stop()
 	serverClosed := false
@@ -116,7 +117,7 @@ func (s *server) mainRoutine() {
 		case msg := <-s.receivedChan:
 			serverProcessMessage(s, msg)
 
-		case connId := <-s.closeConnChannel:
+		case connId := <-s.closeConnChan:
 			info := s.clientMap[connId]
 			if info == nil {
 				s.closeConnReplyChan <- false
@@ -131,6 +132,7 @@ func (s *server) mainRoutine() {
 
 		case writeData := <-s.writeDataChan:
 			if s.clientMap[writeData.id] == nil {
+				// if the connection has already been lost, simply ignore the payload
 				s.writeDataResultChan <- false
 				continue
 			}
@@ -139,6 +141,7 @@ func (s *server) mainRoutine() {
 			outGoingSeq := s.clientMap[connId].nextServerSeq
 			s.clientMap[connId].nextServerSeq++
 			size := len(payload)
+			// construct the new data message
 			data := NewData(connId, outGoingSeq, size, payload, calculateCheckSum(connId, outGoingSeq, size, payload))
 
 			//send using sliding window here
@@ -157,11 +160,13 @@ func (s *server) mainRoutine() {
 				}
 				c.alreadySentInEpoch = true
 			} else {
+				// too many messages unacked, put message to buffer (sliding window congestion control)
 				c.outgoingBuf = append(c.outgoingBuf, data)
 			}
 			s.writeDataResultChan <- true
 
 		case <-ticker.C:
+			// epoch case
 			if serverClosed && len(s.clientMap) == 0 {
 				s.conn.Close()
 				s.messageBufRoutineCloseChan <- struct{}{}
@@ -176,7 +181,8 @@ func (s *server) mainRoutine() {
 				if client.alreadySentInEpoch {
 					client.alreadySentInEpoch = false
 				} else {
-					s.writeAckChan <- &messageWithAddr{NewAck(id, 0), &client.remoteAddr} //send the heartbeat ack here
+					// send heartbeat here
+					s.writeAckChan <- &messageWithAddr{NewAck(id, 0), &client.remoteAddr}
 				}
 				if !client.alreadyHeardInEpoch {
 					client.lastEpochHeardFromClient++
@@ -196,7 +202,7 @@ func (s *server) mainRoutine() {
 				}
 
 				for _, element := range client.unackedBuf {
-					if element.currentBackoff == element.epochCounter {
+					if element.currentBackoff == element.epochCounter { // if backoff has reached, time to send the message again
 						payload, err := json.Marshal(element.message)
 						if err != nil {
 							continue
@@ -213,7 +219,7 @@ func (s *server) mainRoutine() {
 						} else {
 							element.currentBackoff *= 2
 						}
-					} else {
+					} else { // otherwise, simply increment the backoff counter
 						element.epochCounter++
 					}
 				}
@@ -456,7 +462,7 @@ func (s *server) CloseConn(connId int) error {
 	if s.isClosed {
 		return errors.New("the server has been already closed")
 	}
-	s.closeConnChannel <- connId
+	s.closeConnChan <- connId
 	if !<-s.closeConnReplyChan {
 		return errors.New("channel does not exist")
 	}
