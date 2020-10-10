@@ -27,6 +27,8 @@ type server struct {
 	closeConnChannel       chan int
 	closeConnReplyChan     chan bool
 	isClosed               bool
+	closeServerSignalChan  chan struct{}
+	closeServerSuccessChan chan bool
 }
 
 type clientInfo struct {
@@ -85,6 +87,8 @@ func NewServer(port int, params *Params) (Server, error) {
 		make(chan int),
 		make(chan bool),
 		false,
+		make(chan struct{}),
+		make(chan bool),
 	}
 
 	go newServer.readRoutine()
@@ -96,10 +100,12 @@ func NewServer(port int, params *Params) (Server, error) {
 }
 
 // mainRoutine mainly listens for different message types received
-// from the recievedChan, and performs different tasks based on it.
+// from the receivedChan, and performs different tasks based on it.
 func (s *server) mainRoutine() {
 	ticker := time.NewTicker(time.Millisecond * time.Duration(s.params.EpochMillis))
 	defer ticker.Stop()
+	serverClosed := false
+	serverClosedSuccess := true
 	for {
 		select {
 		case msg := <-s.receivedChan:
@@ -151,6 +157,12 @@ func (s *server) mainRoutine() {
 			s.writeDataResultChan <- true
 
 		case <-ticker.C:
+			if serverClosed && len(s.clientMap) == 0 {
+				//todo close routines
+
+
+				s.closeServerSuccessChan <- serverClosedSuccess
+			}
 			for id, client := range s.clientMap {
 				if client.alreadySentInEpoch {
 					client.alreadySentInEpoch = false
@@ -168,8 +180,12 @@ func (s *server) mainRoutine() {
 				if client.lastEpochHeardFromClient == s.params.EpochLimit {
 					fmt.Printf("no heartbeat. Deleted client: %v\n", id)
 					delete(s.clientMap, id)
+					// we send an message with nil payload to indicate that the client is lost
 					s.nextUnbufferedMsgChan <- &Message{
 						ConnID: id,
+					}
+					if serverClosed {
+						serverClosedSuccess = false
 					}
 					continue
 				}
@@ -195,6 +211,15 @@ func (s *server) mainRoutine() {
 					} else {
 						element.epochCounter++
 					}
+				}
+			}
+		case <-s.closeServerSignalChan:
+			serverClosed = true
+			for connId, info := range s.clientMap {
+				if len(info.unackedBuf) == 0 && len(info.outgoingBuf) == 0 {
+					delete(s.clientMap, connId)
+				} else {
+					info.isClosed = true
 				}
 			}
 		}
@@ -335,7 +360,6 @@ func (s *server) readRoutine() {
 
 // messageBufferRoutine is responsible for responding data messages to clients.
 func (s *server) messageBufferRoutine() {
-	droppedClients := make([]int, 0)
 	for {
 		select {
 		case msg := <-s.nextUnbufferedMsgChan:
@@ -343,12 +367,7 @@ func (s *server) messageBufferRoutine() {
 			// and wait until the the read method is called
 			s.unreadMessages = append(s.unreadMessages, msg)
 		case <-s.requestReadMessageChan:
-			if len(droppedClients) > 0 {
-				s.replyReadMessageChan <- &Message{
-					ConnID: droppedClients[0],
-				}
-				droppedClients = droppedClients[1:]
-			} else if len(s.unreadMessages) > 0 {
+			if len(s.unreadMessages) > 0 {
 				// if there's cached messages, simply send the first one back
 				s.replyReadMessageChan <- s.unreadMessages[0]
 				s.unreadMessages = s.unreadMessages[1:]
@@ -421,5 +440,12 @@ func (s *server) CloseConn(connId int) error {
 
 func (s *server) Close() error {
 	s.isClosed = true
-	return errors.New("not yet implemented")
+	s.closeServerSignalChan <- struct{}{}
+
+	//todo close conn
+	if <-s.closeServerSuccessChan {
+		return nil
+	} else {
+		return errors.New("client lost during closing")
+	}
 }

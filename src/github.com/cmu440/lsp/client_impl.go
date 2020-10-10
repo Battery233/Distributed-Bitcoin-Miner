@@ -185,7 +185,7 @@ func (c *client) mainRoutine() {
 				}
 				payload, err1 := json.Marshal(data)
 				_, err2 := c.conn.Write(payload)
-				if err1 != nil || err2 !=nil {
+				if err1 != nil || err2 != nil {
 					c.writeDataResultChan <- false
 					continue
 				}
@@ -247,7 +247,6 @@ func (c *client) mainRoutine() {
 			fmt.Println("step 3")
 			c.closedSuccessfullyChan <- struct{}{}
 			fmt.Println("step 4")
-
 			return
 		}
 	}
@@ -445,11 +444,11 @@ func (c *client) Read() ([]byte, error) {
 func (c *client) Write(payload []byte) error {
 	if c.isServerLost {
 		return errors.New("the server is lost")
-	} else{
+	} else {
 		c.writeDataChan <- payload
 		if <-c.writeDataResultChan {
 			return nil
-		}else{
+		} else {
 			return errors.New("write data to server error")
 		}
 	}
