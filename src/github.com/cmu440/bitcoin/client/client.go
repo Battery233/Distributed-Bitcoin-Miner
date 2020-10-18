@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"github.com/cmu440/bitcoin"
 	"os"
 	"strconv"
 
@@ -28,13 +30,37 @@ func main() {
 		return
 	}
 
-	defer client.Close()
+	defer func() () {
+		if client != nil {
+			client.Close()
+		}
+	}()
 
-	_ = message    // Keep compiler happy. Please remove!
-	_ = maxNonce   // Keep compiler happy. Please remove!
-	// TODO: implement this!
+	request := bitcoin.NewRequest(message, 0, maxNonce)
+	payload, err := json.Marshal(request)
+	if err != nil {
+		fmt.Println("Message json encoding error", err)
+		return
+	}
 
-	printResult(0, 0)
+	err = client.Write(payload)
+	if err != nil {
+		printDisconnected()
+		return
+	}
+
+	response, err := client.Read()
+
+	if err != nil {
+		printDisconnected()
+		return
+	}
+	var result bitcoin.Message
+	if json.Unmarshal(response[:], &result) != nil {
+		printDisconnected()
+		return
+	}
+	printResult(result.Hash, result.Nonce)
 }
 
 // printResult prints the final result to stdout.

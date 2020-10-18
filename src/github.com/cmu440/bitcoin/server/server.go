@@ -9,6 +9,8 @@ import (
 	"github.com/cmu440/lsp"
 )
 
+//todo check prints
+
 type server struct {
 	lspServer lsp.Server
 }

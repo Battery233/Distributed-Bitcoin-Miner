@@ -55,14 +55,18 @@ func NewClient(hostport string, params *Params) (Client, error) {
 	addr, err := lspnet.ResolveUDPAddr("udp", hostport)
 	conn, err := lspnet.DialUDP("udp", nil, addr)
 	if err != nil {
-		conn.Close()
+		if conn != nil {
+			conn.Close()
+		}
 		return nil, err
 	}
 
 	// construct a new "connect" message and serialize it
 	payload, err := json.Marshal(NewConnect())
 	if err != nil {
-		conn.Close()
+		if conn != nil {
+			conn.Close()
+		}
 		return nil, err
 	}
 
@@ -105,7 +109,9 @@ func NewClient(hostport string, params *Params) (Client, error) {
 	connectCounter := 1
 	_, err = conn.Write(payload)
 	if err != nil {
-		conn.Close()
+		if conn != nil {
+			conn.Close()
+		}
 		return nil, err
 	}
 
@@ -117,12 +123,16 @@ Connect:
 			connectCounter++
 			if connectCounter > params.EpochLimit {
 				// if cannot connect to the server after many epochs, close connection.
-				conn.Close()
+				if conn != nil {
+					conn.Close()
+				}
 				return nil, errors.New("connect failed")
 			}
 			_, err = conn.Write(payload)
 			if err != nil {
-				conn.Close()
+				if conn != nil {
+					conn.Close()
+				}
 				return nil, err
 			}
 		case msg := <-newClient.receivedChan:
