@@ -16,12 +16,12 @@ func joinWithServer(hostport string) (lsp.Client, error) {
 		return nil, err
 	}
 
+	// send a join request to the server
 	joinRequest := bitcoin.NewJoin()
 	payload, err := json.Marshal(joinRequest)
 	if err != nil {
 		return nil, err
 	}
-
 	err = miner.Write(payload)
 	if err != nil {
 		return nil, err
@@ -51,10 +51,12 @@ func main() {
 	}
 
 	for {
+		// main loop for reading requests from the server
 		response, err := miner.Read()
 		if err != nil {
 			break
 		}
+
 		var message bitcoin.Message
 		err = json.Unmarshal(response, &message)
 		if err != nil {
@@ -63,6 +65,8 @@ func main() {
 		data := message.Data
 		lower := message.Lower
 		upper := message.Upper
+
+		// perform the actual mining task
 		hash, nonce := calculateHashAndNonce(data, lower, upper)
 		result := bitcoin.NewResult(hash, nonce)
 		resultPayload, err := json.Marshal(result)
@@ -76,6 +80,7 @@ func main() {
 	}
 }
 
+// calculate the min hash and nonce in a range
 func calculateHashAndNonce(data string, lower, upper uint64) (uint64, uint64) {
 	min := bitcoin.Hash(data, upper)
 	nonce := upper

@@ -36,28 +36,30 @@ func main() {
 		}
 	}()
 
+	// send request to the server
 	request := bitcoin.NewRequest(message, 0, maxNonce)
 	payload, err := json.Marshal(request)
 	if err != nil {
 		fmt.Println("Message json encoding error", err)
 		return
 	}
-
 	err = client.Write(payload)
 	if err != nil {
 		printDisconnected()
 		return
 	}
 
+	// get the response from the server
 	response, err := client.Read()
-
 	if err != nil {
 		printDisconnected()
 		return
 	}
+
+	// parse message and print the result
 	var result bitcoin.Message
 	if json.Unmarshal(response[:], &result) != nil {
-		printDisconnected()
+		fmt.Println("json format error")
 		return
 	}
 	printResult(result.Hash, result.Nonce)
