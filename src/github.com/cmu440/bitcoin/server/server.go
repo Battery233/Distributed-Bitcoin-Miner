@@ -1,7 +1,6 @@
 package main
 
 import (
-	"container/list"
 	"encoding/json"
 	"fmt"
 	"github.com/cmu440/bitcoin"
@@ -17,21 +16,21 @@ import (
 type server struct {
 	lspServer       lsp.Server
 	requestMap      map[int]*requestInfo // a map to link client id and corresponding request
-	requestQueue    *list.List           // a list work as a queue for all requests.
+	requestQueue    []*requestInfo       // a list work as a queue for all requests.
 	activeMiners    map[int]struct{}     // all connected miners. Use map as a set here
-	availableMiners *list.List           // all available miners
+	availableMiners []int                // all available miners
 	ongoingTasks    map[int]*taskUnit    // task units which are executing by the miners
 }
 
 type requestInfo struct {
-	clientId        int        // id of the client
-	data            string     // the request string data
-	lower           uint64     // the lower bound of the range
-	upper           uint64     // the upper bound of the range
-	currentMinHash  uint64     // to store the min hash value
-	currentMinNonce uint64     // to store the nonce for the current hash value
-	taskUnitsLeft   uint64     // number of undone task units
-	taskUnitsQueue  *list.List // a list of task units to be done
+	clientId        int         // id of the client
+	data            string      // the request string data
+	lower           uint64      // the lower bound of the range
+	upper           uint64      // the upper bound of the range
+	currentMinHash  uint64      // to store the min hash value
+	currentMinNonce uint64      // to store the nonce for the current hash value
+	taskUnitsLeft   uint64      // number of undone task units
+	taskUnitsQueue  []*taskUnit // a list of task units to be done
 }
 
 type taskUnit struct {
@@ -50,9 +49,9 @@ func startServer(port int) (*server, error) {
 	srv := &server{
 		lspServer,
 		make(map[int]*requestInfo),
-		list.New(),
+		make([]*requestInfo, 0),
 		make(map[int]struct{}),
-		list.New(),
+		make([]int, 0),
 		make(map[int]*taskUnit),
 	}
 	return srv, nil
@@ -70,7 +69,7 @@ func (srv *server) handleMessage(connId int, payload []byte) {
 		if (message.Upper-message.Lower+1)%chunkSize != 0 {
 			taskUnitsLeft++
 		}
-		taskUnitsQueue := list.New()
+		taskUnitsQueue := make([]*taskUnit, 0)
 		for i := uint64(0); i < taskUnitsLeft; i++ {
 			unit := &taskUnit{
 				connId,
@@ -80,7 +79,7 @@ func (srv *server) handleMessage(connId int, payload []byte) {
 			if unit.end > message.Upper {
 				unit.end = message.Upper
 			}
-			taskUnitsQueue.PushBack(unit)
+			taskUnitsQueue = append(taskUnitsQueue, unit)
 		}
 		rInfo := &requestInfo{
 			connId,
@@ -92,18 +91,18 @@ func (srv *server) handleMessage(connId int, payload []byte) {
 			taskUnitsLeft,
 			taskUnitsQueue,
 		}
-		srv.requestQueue.PushBack(rInfo)
+		srv.requestQueue = append(srv.requestQueue, rInfo)
 		srv.requestMap[connId] = rInfo
 	case bitcoin.Join:
 		srv.activeMiners[connId] = struct{}{}
-		srv.availableMiners.PushBack(connId)
+		srv.availableMiners = append(srv.availableMiners, connId)
 	case bitcoin.Result:
 		clientId := srv.ongoingTasks[connId].clientId
 		rInfo, exist := srv.requestMap[clientId]
 
 		//release the miner
 		delete(srv.ongoingTasks, connId)
-		srv.availableMiners.PushBack(connId)
+		srv.availableMiners = append(srv.availableMiners, connId)
 
 		if !exist { //the client is lost and we ignore the result here
 			return
@@ -126,6 +125,14 @@ func (srv *server) handleMessage(connId int, payload []byte) {
 			if err != nil {
 				return
 			}
+			clientInfo := srv.requestMap[clientId]
+			for i, e := range srv.requestQueue {
+				if e == clientInfo {
+					srv.requestQueue = append(srv.requestQueue[:i], srv.requestQueue[i+1:]...)
+					break
+				}
+			}
+			delete(srv.requestMap, clientId)
 		}
 	}
 }
@@ -139,12 +146,12 @@ func (srv *server) handleLostConn(connId int) {
 		if _, exist := srv.ongoingTasks[connId]; exist {
 			//push the lost job back to the queue
 			unit := srv.ongoingTasks[connId]
-			srv.requestMap[unit.clientId].taskUnitsQueue.PushBack(unit)
+			srv.requestMap[unit.clientId].taskUnitsQueue = append(srv.requestMap[unit.clientId].taskUnitsQueue, unit)
 			delete(srv.ongoingTasks, connId)
 		} else {
-			for e := srv.availableMiners.Front(); e != nil; e = e.Next() {
-				if e.Value == connId {
-					srv.availableMiners.Remove(e)
+			for i, value := range srv.availableMiners {
+				if value == connId {
+					srv.availableMiners = append(srv.availableMiners[:i], srv.availableMiners[i+1:]...)
 					break
 				}
 			}
@@ -153,7 +160,33 @@ func (srv *server) handleLostConn(connId int) {
 }
 
 func (srv *server) distributeTasks() {
-	
+	numUnits := 0
+	for _, e := range srv.requestQueue {
+		numUnits += len(e.taskUnitsQueue)
+	}
+
+	for len(srv.availableMiners) > 0 && numUnits > 0 {
+		request := srv.requestQueue[0]
+		srv.requestQueue = append(srv.requestQueue[1:], request)
+		if len(request.taskUnitsQueue) > 0 {
+			unit := request.taskUnitsQueue[0]
+			request.taskUnitsQueue = request.taskUnitsQueue[1:]
+			minerId := srv.availableMiners[0]
+			srv.availableMiners = srv.availableMiners[1:]
+			srv.ongoingTasks[minerId] = unit
+			data := srv.requestMap[unit.clientId].data
+			payload, err := json.Marshal(bitcoin.NewRequest(data, unit.start, unit.end))
+			if err != nil {
+				return
+			}
+			err = srv.lspServer.Write(minerId, payload)
+			if err != nil {
+				// miner lost
+				srv.handleLostConn(minerId)
+			}
+			numUnits--
+		}
+	}
 }
 
 var LOGF *log.Logger
