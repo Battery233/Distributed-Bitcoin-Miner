@@ -138,6 +138,12 @@ func (srv *server) handleMessage(connId int, payload []byte) {
 func (srv *server) handleLostConn(connId int) {
 	if _, exist := srv.requestMap[connId]; exist {
 		// a client is lost
+		for i, e := range srv.requestQueue {
+			if e.clientId == connId {
+				srv.requestQueue = append(srv.requestQueue[:i], srv.requestQueue[i+1:]...)
+				break
+			}
+		}
 		delete(srv.requestMap, connId)
 	} else { //a miner is lost
 		delete(srv.activeMiners, connId)
