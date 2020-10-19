@@ -11,8 +11,6 @@ import (
 	"github.com/cmu440/lsp"
 )
 
-//todo check prints
-
 type server struct {
 	lspServer       lsp.Server
 	requestMap      map[int]*requestInfo // a map to link client id and corresponding request
@@ -116,7 +114,7 @@ func (srv *server) handleMessage(connId int, payload []byte) {
 		}
 
 		if rInfo.taskUnitsLeft == 0 { // write back the result to the client
-			resultMessage := bitcoin.NewResult(message.Hash, message.Nonce)
+			resultMessage := bitcoin.NewResult(rInfo.currentMinHash, rInfo.currentMinNonce)
 			payload, err := json.Marshal(resultMessage)
 			if err != nil {
 				return

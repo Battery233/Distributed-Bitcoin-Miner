@@ -281,13 +281,13 @@ func serverProcessMessage(s *server, msg *messageWithAddr) {
 			msg.message.Payload = msg.message.Payload[0:msg.message.Size]
 		}
 
-		if msg.message.Checksum != calculateCheckSum(msg.message.ConnID, msg.message.SeqNum, msg.message.Size, msg.message.Payload) {
-			//discard message with wrong checksum
-			return
-		}
+		//if msg.message.Checksum != calculateCheckSum(msg.message.ConnID, msg.message.SeqNum, msg.message.Size, msg.message.Payload) {
+		//	//discard message with wrong checksum
+		//	return
+		//}
 
 		s.writeAckChan <- &messageWithAddr{NewAck(id, seq), msg.addr} //send the ack here
-		if seq < client.nextClientSeq {
+		if client == nil || seq < client.nextClientSeq {
 			//discard messages we already received
 			return
 		}

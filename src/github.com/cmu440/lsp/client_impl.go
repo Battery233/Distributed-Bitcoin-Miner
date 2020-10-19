@@ -282,10 +282,10 @@ func clientProcessMessage(c *client, message *Message, closed bool) bool {
 			message.Payload = message.Payload[0:message.Size]
 		}
 
-		if message.Checksum != calculateCheckSum(message.ConnID, message.SeqNum, message.Size, message.Payload) {
-			// data is corrupted, simply ignore the corrupted data
-			return false
-		}
+		//if message.Checksum != calculateCheckSum(message.ConnID, message.SeqNum, message.Size, message.Payload) {
+		//	// data is corrupted, simply ignore the corrupted data
+		//	return false
+		//}
 
 		c.writeAckChan <- NewAck(c.connID, seq)
 		if seq < c.incomingSeq {
