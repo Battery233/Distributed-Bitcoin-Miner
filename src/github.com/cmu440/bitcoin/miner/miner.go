@@ -39,7 +39,7 @@ func main() {
 	hostport := os.Args[1]
 	miner, err := joinWithServer(hostport)
 
-	defer func() () {
+	defer func() {
 		if miner != nil {
 			miner.Close()
 		}

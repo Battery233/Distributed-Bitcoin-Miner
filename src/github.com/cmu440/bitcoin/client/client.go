@@ -30,7 +30,7 @@ func main() {
 		return
 	}
 
-	defer func() () {
+	defer func() {
 		if client != nil {
 			client.Close()
 		}
